@@ -1,0 +1,19 @@
+## -*- mode: makefile -*-
+##
+## Makevars.win for GLOWr package (Windows-specific settings)
+##
+## Edit log (reverse chronological):
+## - 2026-06-19 (Claude Code, Opus 4.8 / 1M ctx, prompted by ZWu): added PKG_LIBS
+##   linking BLAS/LAPACK. The Rtools toolchain does not auto-link them, so the
+##   RcppArmadillo matrix ops in compute_GHG.cpp would fail to link on Windows
+##   ("undefined reference to `dgemm_'/`dsyev_'") -- the same fix applied to
+##   GFisher. Windows uses Makevars.win in preference to Makevars, so the line
+##   must be here too.
+## - 2026-06-13 (Claude Code / r-developer, prompted by ZWu for the GLOWr release
+##   gate): removed `CXX_STD = CXX11` and the vestigial `$(SHLIB_OPENMP_CXXFLAGS)`
+##   flag (the C++ sources use no OpenMP), mirroring src/Makevars.
+
+## Header include path for the package's own headers.
+PKG_CPPFLAGS = -I../inst/include
+## RcppArmadillo BLAS/LAPACK linkage (required by the Rtools toolchain).
+PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)

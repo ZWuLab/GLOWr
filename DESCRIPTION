@@ -1,0 +1,53 @@
+Package: GLOWr
+Type: Package
+Title: inteGrative anaLysis using Optimized Weights (GLOW) for Rare Variant Analysis
+Version: 0.1.0
+Date: 2026-06-13
+Authors@R: c(
+    person("Hong", "Zhang", email = "consistencyzhang@gmail.com", role = "aut"),
+    person("Ming", "Liu", email = "mliu5@wpi.edu", role = "aut"),
+    person("Zheyang", "Wu", email = "zheyangwu@wpi.edu", role = c("aut", "cre"))
+    )
+Description: Implements the GLOW (inteGrative anaLysis using Optimized Weights) methodology
+    for integrative variant-set association analysis with optimal weighting in
+    whole-genome sequencing studies. Provides methods for Burden, SKAT, Fisher,
+    and Omnibus tests with optimal weight calculation. The package supports both
+    continuous and binary phenotypes with options for covariate adjustment and
+    genome-wide analysis.
+URL: https://zwulab.github.io/GLOWr/, https://github.com/ZWuLab/GLOWr
+BugReports: https://github.com/ZWuLab/GLOWr/issues
+License: GPL-3
+Encoding: UTF-8
+LazyData: true
+Depends: R (>= 3.5.0)
+Imports: stats,
+    utils,
+    graphics,
+    grDevices,
+    glmnet,
+    Matrix,
+    SPAtest,
+    GFisher,
+    Rcpp (>= 1.0.0),
+    digest,
+    data.table
+LinkingTo: Rcpp,
+    RcppArmadillo
+Suggests: MASS,
+    mvtnorm,
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    readxl,
+    gdsfmt,
+    SeqArray,
+    SNPRelate,
+    STAAR,
+    rprojroot,
+    withr
+Remotes: ZWuLab/GFisher,
+    xihaoli/STAAR
+VignetteBuilder: knitr
+biocViews: StatisticalMethod, GenomeWideAssociation, SNP, Genetics, VariantAnnotation, Sequencing, Regression
+RoxygenNote: 7.3.3
+Roxygen: list(markdown = TRUE)

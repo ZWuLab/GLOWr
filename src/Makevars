@@ -1,0 +1,23 @@
+## -*- mode: makefile -*-
+##
+## Makevars for GLOWr package
+##
+## This file configures C++ compilation settings for the package.
+##
+## Edit log (reverse chronological):
+## - 2026-06-19 (Claude Code, Opus 4.8 / 1M ctx, prompted by ZWu): added
+##   PKG_LIBS linking BLAS/LAPACK. compute_GHG.cpp uses RcppArmadillo matrix ops
+##   (which call dgemm_/dsyev_/etc.); R auto-links a BLAS on Linux/macOS but the
+##   Windows (Rtools) toolchain does not, so the ZWuLab Windows R-CMD-check would
+##   fail at link time without this (same root cause as the GFisher Windows job).
+## - 2026-06-13 (Claude Code / r-developer, prompted by ZWu for the GLOWr release
+##   gate): removed `CXX_STD = CXX11` (modern R defaults to C++11 or later, so
+##   specifying it triggers an --as-cran "please drop specification" NOTE) and
+##   removed the `$(SHLIB_OPENMP_CXXFLAGS)` flag (the C++ sources use no OpenMP --
+##   no `#pragma omp` anywhere -- so it was vestigial and produced an "OPENMP
+##   macro in PKG_CXXFLAGS but none in PKG_LIBS" NOTE).
+
+## Header include path for the package's own headers.
+PKG_CPPFLAGS = -I../inst/include
+## RcppArmadillo BLAS/LAPACK linkage (required on Windows; harmless elsewhere).
+PKG_LIBS = $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)

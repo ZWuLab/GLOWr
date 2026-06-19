@@ -1,0 +1,1280 @@
+---
+title: "Estimating Allelic Effect Sizes (B) for Optimal Weighting"
+author: "GLOWr Package"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimating Allelic Effect Sizes (B) for Optimal Weighting}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+## Introduction
+
+In the GLOW (inteGrative anaLysis using Optimized Weights) framework, accurate estimation of allelic effect sizes $b(q)$ as a function of minor allele frequency (MAF) $q$ is crucial for calculating optimal weights. This vignette demonstrates how to estimate effect sizes from literature data using both the all-in-one `get_B()` function and the train/predict workflow (`train_B_model()` + `predict_B()`).
+
+### Why Estimate B?
+
+The GLOW framework assigns optimal weights to variants in a gene set based on two key components:
+
+1. **Effect size (B)**: The expected magnitude of the allelic effect given the variant's MAF
+2. **Variant-importance score (PI)**: The annotation-derived relative likelihood that a variant is important for the trait
+
+Accurate B estimation improves power by:
+
+- Upweighting variants with larger expected effects
+- Appropriately accounting for the MAF-effect size relationship
+- Leveraging information from large-scale GWAS studies
+
+### Two Workflows
+
+GLOWr provides two workflows for B estimation:
+
+1. **All-in-one**: `get_B()` trains a model and predicts B in a single call. Best for simple, one-shot analyses.
+2. **Train/predict**: `train_B_model()` trains a model once, then `predict_B()` applies it to new MAF values. Best for per-chromosome or repeated-prediction workflows.
+
+### Two Estimation Methods
+
+`get_B()` supports two complementary methods:
+
+**1. Direct Beta Method**
+
+- Uses effect sizes (BETA) directly from training data
+- Best when training and target have the same trait type
+- Provides the most direct relationship between MAF and effect size
+- Formula: Model $\beta^2 \sim f(q)$ where $\beta$ is the effect size and $q$ is MAF
+
+**2. P-value/Z-score Method**
+
+- Uses p-values to compute a trait-independent measure $h(q)$
+- Can transfer information between different trait types
+- More flexible but requires careful specification of target parameters
+- Formula: $Z^2 = \chi^2_{1-p}(1)$, then $h^2(q) = Z^2 / [2Nq(1-q)]$
+
+When both methods are applicable (same trait type, both BETA and p-values available), running both provides validation of estimates.
+
+### What You'll Learn
+
+This vignette covers:
+
+- Quick start with minimal code (both workflows)
+- Understanding when to use each method
+- Working with real example datasets (ALS, BMD)
+- Comparing methods with `method="both"`
+- The train/predict workflow for per-chromosome analysis
+- Diagnostics and quality control
+- Practical recommendations for your analysis
+
+## Quick Start
+
+### All-in-One with `get_B()`
+
+Here's a complete example in ~10 lines:
+
+```{r quickstart, eval=FALSE}
+library(GLOWr)
+
+# Load example ALS data (lazy-loaded package data)
+data(ALS_snvs_B_training)
+
+# Define target MAFs (your study variants)
+target_mafs <- seq(0.01, 0.4, length.out = 50)
+
+# Estimate effect sizes
+B <- get_B(
+  training_trait = "binary",
+  training_MAF = ALS_snvs_B_training$MAF,
+  training_BETA = ALS_snvs_B_training$BETA,
+  target_trait = "binary",
+  target_MAF = target_mafs,
+  target_case_prop = 0.001  # ALS case proportion in study
+)
+
+# Plot results
+plot(target_mafs, B, type = "l", lwd = 2, col = "darkblue",
+     xlab = "Minor Allele Frequency", ylab = "Estimated Effect Size (B)",
+     main = "Effect Size vs MAF for ALS")
+```
+
+That's it! You now have effect size estimates for each target variant that can be used in optimal weight calculation.
+
+### Train Once, Predict Many with `train_B_model()` + `predict_B()`
+
+When you need to predict B for multiple chromosome or variant sets, train the model once and reuse it:
+
+```{r quickstart-train-predict, eval=FALSE}
+library(GLOWr)
+
+# Load example ALS data (lazy-loaded package data)
+data(ALS_snvs_B_training)
+
+# Step 1: Train the model (once)
+b_model <- train_B_model(
+  training_trait = "binary",
+  training_MAF = ALS_snvs_B_training$MAF,
+  training_BETA = ALS_snvs_B_training$BETA,
+  method = "beta"
+)
+print(b_model)
+
+# Step 2: Predict B for different target MAF sets (many times)
+# E.g., per chromosome in a genome-wide analysis
+for (chr in 1:22) {
+  chr_mafs <- get_chromosome_mafs(chr)  # your function to get MAFs
+  B_chr <- predict_B(b_model, target_MAF = chr_mafs)
+  # ... use B_chr in downstream analysis
+}
+
+# The trained model can also be saved/loaded for later use
+save_B_model(b_model, "my_trained_B_model.rds")
+loaded_model <- load_B_model("my_trained_B_model.rds")
+```
+
+The train/predict workflow avoids redundant model fitting and is the recommended approach for pipelines that process data chromosome-by-chromosome.
+
+## Understanding the Methods
+
+### Direct Beta Method: Using Effect Sizes Directly
+
+When you have effect sizes (BETA values) from studies of the same trait, the direct beta method models the relationship:
+
+$$\beta^2 = f(q)$$
+
+where $\beta$ is the effect size and $q$ is the MAF.
+
+**Mathematical Details:**
+
+The function:
+
+1. Squares the training BETA values: $Y = \beta^2$
+2. Fits regression models with various transformations
+3. Selects the best-fitting model (by default, highest $R^2$)
+4. Predicts $\hat{Y}$ for target MAF
+5. Returns $\hat{\beta} = \sqrt{\hat{Y}}$
+
+**Eight Candidate Models:**
+
+The function automatically tests 8 transformations:
+
+| Model | Formula | When It Works Best |
+|-------|---------|-------------------|
+| 1 | $\beta^2 \sim q$ | Linear MAF-effect relationship |
+| 2 | $\beta^2 \sim q(1-q)$ | Effect peaks at intermediate MAF |
+| 3 | $\beta^2 \sim \log(q)$ | Effect increases with rarer variants |
+| 4 | $\beta^2 \sim \log[q(1-q)]$ | Combines frequency function with log |
+| 5 | $\log(\beta^2) \sim q$ | Exponential relationship |
+| 6 | $\log(\beta^2) \sim q(1-q)$ | Log-linear with frequency function |
+| 7 | $\log(\beta^2) \sim \log(q)$ | Power law relationship |
+| 8 | $\log(\beta^2) \sim \log[q(1-q)]$ | Complex power law |
+
+**When to Use:**
+
+- Training and target traits are the same type (both binary or both continuous)
+- Effect sizes (BETA) are available in training data
+- You want the most direct MAF-effect size relationship
+- Training data is from well-powered studies
+
+### P-value/Z-score Method: Trait-Independent Estimation
+
+This method converts p-values to a trait-independent measure that can transfer across trait types.
+
+**Mathematical Details:**
+
+The transformation proceeds in steps:
+
+1. **Convert p-values to $Z^2$:**
+   $$Z^2 = \chi^2_{1-p}(1) = \text{qchisq}(p, \text{df}=1, \text{lower.tail}=\text{FALSE})$$
+
+2. **Calculate trait-independent $h^2$:**
+   $$h^2(q) = \frac{Z^2}{2Nq(1-q)}$$
+   where $N$ is the sample size.
+
+3. **Model $h^2$ as function of MAF:**
+   $$h^2 = f(q)$$
+
+4. **Convert back to trait-specific $\beta$:**
+   - **Continuous trait:** $\beta = h \times \text{SE}^*$
+   - **Binary trait:** $\beta = h / \sqrt{p_0^*(1-p_0^*)}$
+
+   where $\text{SE}^*$ is the standard error for continuous traits and $p_0^*$ is the case proportion in the target case-control study.
+
+**Key Insight:**
+
+The function $h(q)$ represents a standardized effect that is independent of trait measurement units. This allows transfer of information between:
+
+- Continuous trait $\rightarrow$ Binary trait
+- Binary trait $\rightarrow$ Continuous trait
+- Different continuous traits with different units
+
+**When to Use:**
+
+- Training and target traits differ (e.g., BMD $\rightarrow$ osteoporosis)
+- Only p-values available (no BETA values)
+- You want to leverage large studies with only summary statistics
+- Cross-trait prediction is scientifically justified
+
+### Method Selection Logic
+
+The `method` parameter controls which estimation approach to use:
+
+```{r method-logic, eval=FALSE}
+# method = "auto" (default)
+# Automatically chooses:
+#   - "both" if same trait AND BETA available
+#   - "pvalue" otherwise
+
+# method = "beta"
+# Direct beta method only (requires BETA)
+
+# method = "pvalue"
+# P-value/Z-score method only (requires P, N)
+
+# method = "both"
+# Run both methods for comparison (when applicable)
+```
+
+**Decision Tree:**
+
+```
+Training trait == Target trait?
+├─ Yes → BETA available?
+│        ├─ Yes → Use "both" (direct beta + p-value)
+│        └─ No → Use "pvalue"
+└─ No → Use "pvalue" only
+```
+
+## Basic Usage Examples
+
+### Example 1: Binary Trait, Same Training/Target, Beta Method
+
+Use direct beta method when you have effect sizes from the same trait:
+
+```{r example1, eval=FALSE}
+# Simulate training data (or load from literature)
+set.seed(123)
+training_MAF <- runif(100, 0.001, 0.4)
+# Effect size decreases with MAF (typical pattern)
+training_BETA <- 0.3 * sqrt(training_MAF * (1 - training_MAF)) + rnorm(100, 0, 0.05)
+
+# Your study variants
+target_MAF <- c(0.01, 0.05, 0.1, 0.2, 0.3)
+
+# Estimate B using direct beta method
+B_beta <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  method = "beta"  # Direct beta method only
+)
+
+print(data.frame(MAF = target_MAF, B = B_beta))
+```
+
+### Example 2: Binary Trait, P-value Method
+
+When you only have p-values (no effect sizes):
+
+```{r example2, eval=FALSE}
+# Training data with p-values
+set.seed(456)
+training_MAF <- runif(100, 0.001, 0.4)
+training_P <- runif(100, 1e-8, 0.1)
+training_N <- sample(1000:10000, 100, replace = TRUE)
+
+# Target parameters
+target_MAF <- seq(0.01, 0.4, by = 0.05)
+target_case_prop <- 0.1  # 10% cases in target case-control study
+
+# Estimate B using p-value method
+B_pval <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "pvalue"
+)
+
+print(head(data.frame(MAF = target_MAF, B = B_pval)))
+```
+
+### Example 3: Continuous Trait
+
+For continuous traits (e.g., height, BMI), you need standard errors:
+
+```{r example3, eval=FALSE}
+# Training data from continuous trait GWAS
+set.seed(789)
+training_MAF <- runif(80, 0.01, 0.5)
+training_P <- runif(80, 1e-6, 0.05)
+training_N <- rep(10000, 80)
+
+# Target continuous trait with SE
+target_MAF <- seq(0.05, 0.45, by = 0.05)
+target_SE <- rep(0.1, length(target_MAF))  # Standard error in target study
+
+# Estimate B
+B_continuous <- get_B(
+  training_trait = "continuous",
+  training_MAF = training_MAF,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "continuous",
+  target_MAF = target_MAF,
+  target_SE = target_SE,
+  method = "pvalue"
+)
+
+print(head(data.frame(MAF = target_MAF, B = B_continuous)))
+```
+
+### Example 4: Cross-Trait Estimation
+
+Transfer information from continuous trait (BMD) to binary trait (osteoporosis):
+
+```{r example4, eval=FALSE}
+# Training data from BMD GWAS (continuous trait)
+set.seed(101)
+training_MAF <- runif(200, 0.01, 0.5)
+training_P <- runif(200, 1e-10, 0.01)
+training_N <- sample(50000:100000, 200, replace = TRUE)
+
+# Target is binary osteoporosis outcome
+target_MAF <- seq(0.01, 0.5, length.out = 50)
+target_case_prop <- 0.20  # 20% osteoporosis cases in study
+
+# Cross-trait estimation
+B_cross <- get_B(
+  training_trait = "continuous",  # BMD is continuous
+  training_MAF = training_MAF,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",  # Osteoporosis is binary
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "pvalue",  # Only p-value method works for cross-trait
+  verbose = 2
+)
+
+# Plot the transfer
+plot(target_MAF, B_cross, type = "l", lwd = 2, col = "purple",
+     xlab = "MAF", ylab = "Estimated B (for binary outcome)",
+     main = "Cross-trait: BMD (continuous) to Osteoporosis (binary)")
+```
+
+## Working with Real Data
+
+### Using ALS Example Dataset
+
+The package includes processed ALS (Amyotrophic Lateral Sclerosis) data from literature studies:
+
+```{r als-example, eval=FALSE}
+library(GLOWr)
+
+# Load ALS data (lazy-loaded package data)
+data(ALS_snvs_B_training)
+
+# Examine the data
+str(ALS_snvs_B_training)
+head(ALS_snvs_B_training)
+
+# Training data components
+training_MAF <- ALS_snvs_B_training$MAF
+training_BETA <- ALS_snvs_B_training$BETA
+training_P <- ALS_snvs_B_training$P
+training_N <- ALS_snvs_B_training$N
+
+# Remove any missing values
+valid_idx <- complete.cases(data.frame(training_MAF, training_BETA, training_P, training_N)) &
+             training_MAF > 0 & training_MAF < 1 &
+             abs(training_BETA) > 1e-10
+
+training_MAF <- training_MAF[valid_idx]
+training_BETA <- training_BETA[valid_idx]
+training_P <- training_P[valid_idx]
+training_N <- training_N[valid_idx]
+
+cat(sprintf("ALS training data: %d variants after QC\n", length(training_MAF)))
+
+# Define target MAFs (e.g., variants in your ALS study)
+target_MAF <- seq(0.001, 0.4, length.out = 100)
+
+# ALS case proportion (rare disease)
+# This is the proportion of cases in your case-control study
+# NOT the population prevalence
+target_case_prop <- 0.001  # Example: 200 cases, 200,000 controls
+
+# Estimate B with both methods for comparison
+B_als <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "both",  # Run both for comparison
+  return_full = TRUE,
+  verbose = 2
+)
+
+# View method comparison
+# The model is nested under $model (a glow_B_model object)
+print(B_als$model$method_used)
+if (!is.null(B_als$model$comparison$prediction)) {
+  cat("\nMethod Comparison (on predictions):\n")
+  cat(sprintf("  Correlation: %.3f\n", B_als$model$comparison$prediction$correlation))
+  cat(sprintf("  Mean %% difference: %.1f%%\n",
+              B_als$model$comparison$prediction$mean_percent_diff))
+}
+
+# Plot both methods
+# B predictions are stored as B_beta_method / B_pvalue_method
+par(mfrow = c(1, 2))
+plot(target_MAF, B_als$B_beta_method, type = "l", lwd = 2, col = "blue",
+     xlab = "MAF", ylab = "B", main = "Direct Beta Method")
+plot(target_MAF, B_als$B_pvalue_method, type = "l", lwd = 2, col = "red",
+     xlab = "MAF", ylab = "B", main = "P-value/Z-score Method")
+par(mfrow = c(1, 1))
+
+# Use primary estimates
+B_final <- B_als$B
+```
+
+### Using BMD Example Dataset
+
+Example with continuous trait (Bone Mineral Density):
+
+```{r bmd-example, eval=FALSE}
+# Load BMD data (lazy-loaded package data)
+data(BMD_snvs_B_training)
+
+# Examine data
+str(BMD_snvs_B_training)
+head(BMD_snvs_B_training)
+
+# Training data
+training_MAF <- BMD_snvs_B_training$MAF
+training_P <- BMD_snvs_B_training$P
+training_N <- BMD_snvs_B_training$N
+
+# QC
+valid_idx <- complete.cases(data.frame(training_MAF, training_P, training_N)) &
+             training_MAF > 0 & training_MAF < 1 &
+             training_P > 0 & training_P < 1
+
+training_MAF <- training_MAF[valid_idx]
+training_P <- training_P[valid_idx]
+training_N <- training_N[valid_idx]
+
+cat(sprintf("BMD training data: %d variants after QC\n", length(training_MAF)))
+
+# Target parameters
+target_MAF <- seq(0.01, 0.5, length.out = 100)
+
+# For binary osteoporosis outcome
+target_case_prop <- 0.20  # 20% cases in study
+
+# Estimate B (cross-trait: continuous to binary)
+B_bmd <- get_B(
+  training_trait = "continuous",
+  training_MAF = training_MAF,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "pvalue",  # P-value method for cross-trait
+  return_full = TRUE,
+  verbose = 2
+)
+
+# Plot (B_pvalue_method is the same as B when only p-value method was used)
+plot(target_MAF, B_bmd$B, type = "l", lwd = 2, col = "darkgreen",
+     xlab = "MAF", ylab = "B (binary outcome)",
+     main = "BMD to Osteoporosis: Cross-trait B Estimation")
+```
+
+### Comparing Both Methods with `method="both"`
+
+When both methods are applicable, compare them to validate estimates:
+
+```{r compare-methods, eval=FALSE}
+# Use ALS data (same trait, both BETA and P available)
+data(ALS_snvs_B_training)
+
+# Prepare data
+training_MAF <- ALS_snvs_B_training$MAF
+training_BETA <- ALS_snvs_B_training$BETA
+training_P <- ALS_snvs_B_training$P
+training_N <- ALS_snvs_B_training$N
+
+# Remove invalid
+valid_idx <- complete.cases(data.frame(training_MAF, training_BETA, training_P, training_N)) &
+             training_MAF > 0 & training_MAF < 1
+training_MAF <- training_MAF[valid_idx]
+training_BETA <- training_BETA[valid_idx]
+training_P <- training_P[valid_idx]
+training_N <- training_N[valid_idx]
+
+# Target
+target_MAF <- seq(0.01, 0.4, length.out = 50)
+
+# Run with both methods
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.001,
+  method = "both",  # Run both methods
+  return_full = TRUE,
+  verbose = 2
+)
+
+# Compare results
+# Prediction-based comparison is in result$model$comparison$prediction
+pred_comp <- result$model$comparison$prediction
+cat("\n=== Method Comparison ===\n")
+cat(sprintf("Correlation: %.4f\n", pred_comp$correlation))
+cat(sprintf("RMSE: %.4f\n", pred_comp$rmse))
+cat(sprintf("Mean percent diff: %.2f%%\n", pred_comp$mean_percent_diff))
+cat(sprintf("Max percent diff: %.2f%%\n", pred_comp$max_percent_diff))
+
+# Visualize comparison
+par(mfrow = c(2, 2))
+
+# Scatterplot (note: B_beta_method / B_pvalue_method field names)
+plot(result$B_beta_method, result$B_pvalue_method,
+     xlab = "Direct Beta Method", ylab = "P-value Method",
+     main = "Method Comparison", pch = 16, col = rgb(0,0,1,0.5))
+abline(0, 1, col = "red", lwd = 2, lty = 2)
+legend("topleft", legend = sprintf("r = %.3f", pred_comp$correlation),
+       bty = "n")
+
+# Both methods vs MAF
+plot(target_MAF, result$B_beta_method, type = "l", lwd = 2, col = "blue",
+     xlab = "MAF", ylab = "B", main = "Both Methods",
+     ylim = range(c(result$B_beta_method, result$B_pvalue_method)))
+lines(target_MAF, result$B_pvalue_method, lwd = 2, col = "red", lty = 2)
+legend("topright", legend = c("Beta", "P-value"),
+       col = c("blue", "red"), lty = c(1, 2), lwd = 2, bty = "n")
+
+# Difference vs MAF
+diff <- result$B_beta_method - result$B_pvalue_method
+plot(target_MAF, diff, type = "l", lwd = 2, col = "purple",
+     xlab = "MAF", ylab = "Difference (Beta - Pvalue)",
+     main = "Method Differences")
+abline(h = 0, col = "gray", lty = 2)
+
+# Percent difference
+pct_diff <- 100 * abs(diff) / ((result$B_beta_method + result$B_pvalue_method) / 2)
+plot(target_MAF, pct_diff, type = "l", lwd = 2, col = "orange",
+     xlab = "MAF", ylab = "Percent Difference (%)",
+     main = "Percent Differences")
+abline(h = 10, col = "red", lty = 2)
+
+par(mfrow = c(1, 1))
+
+# Decide which to use
+# If correlation > 0.9 and mean % diff < 10%: Either method is fine
+# If correlation > 0.7 and mean % diff < 20%: Reasonable agreement
+# Otherwise: Investigate discrepancies
+if (pred_comp$correlation > 0.9) {
+  cat("\n[OK] High correlation between methods - both are reliable\n")
+  cat("Recommendation: Use direct beta method (primary)\n")
+} else if (pred_comp$correlation > 0.7) {
+  cat("\n[NOTE] Moderate correlation between methods\n")
+  cat("Recommendation: Investigate differences, consider averaging\n")
+} else {
+  cat("\n[WARNING] Low correlation between methods\n")
+  cat("Recommendation: Check data quality and parameter specifications\n")
+}
+```
+
+## Diagnostics and Model Selection
+
+### Using `return_full=TRUE`
+
+Get detailed results including fitted models:
+
+```{r diagnostics-returnfull, eval=FALSE}
+# Run with full output
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  method = "beta",
+  return_full = TRUE  # Get full result object
+)
+
+# Access components
+names(result)
+# [1] "B"              "B_beta_method"  "B_pvalue_method"
+# [4] "model"          "target_summary"
+
+# The fitted models are nested under result$model$models
+# result$model is a glow_B_model object
+names(result$model)
+# [1] "method_used"      "models"           "all_models_info"
+# [4] "outliers"         "training_summary"  "training_data"
+# [7] "comparison"       "selection_criterion"
+
+# Examine fitted model for the beta method
+summary(result$model$models$beta_method)
+
+# Check which transformation was selected
+formula(result$model$models$beta_method)
+
+# Model fit quality
+cat(sprintf("R-squared: %.4f\n",
+    summary(result$model$models$beta_method)$r.squared))
+cat(sprintf("Adjusted R-squared: %.4f\n",
+    summary(result$model$models$beta_method)$adj.r.squared))
+```
+
+### Plotting Results with `plot()`
+
+Visualize model fit and diagnostics:
+
+```{r diagnostics-plot, eval=FALSE}
+# Get full result
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.001,
+  method = "both",
+  return_full = TRUE
+)
+
+# Dashboard view (2x2 grid)
+plot(result)  # Equivalent to plot(result, type = "all")
+
+# Individual plot types
+plot(result, type = "fit")         # Model fit
+plot(result, type = "residuals")   # Residual diagnostics
+plot(result, type = "comparison")  # Method comparison (if both methods)
+```
+
+The dashboard includes:
+
+- **Top-left**: Training data vs fitted curve (shows model quality)
+- **Top-right**: Q-Q plot (checks residual normality)
+- **Bottom-left**: Residuals vs fitted (checks for patterns)
+- **Bottom-right**: Method comparison or Cook's distance
+
+### Running Diagnostics with `get_B_diagnostics()`
+
+Comprehensive diagnostic report:
+
+```{r diagnostics-detailed, eval=FALSE}
+# Get full result first
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.001,
+  method = "both",
+  return_full = TRUE
+)
+
+# Run diagnostics
+diag <- get_B_diagnostics(
+  result,
+  show_plots = TRUE,      # Display diagnostic plots
+  outlier_threshold = 4,  # Cook's distance threshold
+  verbose = 1             # Print summary
+)
+
+# Examine components
+names(diag)
+# [1] "model_fit"         "residual_stats"    "outliers"
+# [4] "method_comparison" "qc_flags"          "summary_text"
+
+# Model fit statistics
+diag$model_fit$beta$R2       # R-squared
+diag$model_fit$beta$adj_R2   # Adjusted R-squared
+diag$model_fit$beta$formula  # Selected model
+
+# Residual statistics
+diag$residual_stats$mean         # Should be ~0
+diag$residual_stats$normality_p  # Shapiro-Wilk p-value
+
+# Outliers
+diag$outliers$n_outliers     # Number of outliers
+diag$outliers$proportion     # Proportion of data
+diag$outliers$indices        # Which observations
+
+# Quality control flags
+if (length(diag$qc_flags) > 0) {
+  cat("\nQuality Control Issues:\n")
+  for (flag in diag$qc_flags) {
+    cat("  [!]", flag, "\n")
+  }
+} else {
+  cat("\n[OK] No quality control issues detected\n")
+}
+```
+
+### Interpreting Diagnostic Output
+
+**Model Fit (R²):**
+
+- **R² > 0.5**: Good fit - model captures MAF-effect relationship well
+- **R² 0.3-0.5**: Moderate fit - acceptable but more data may help
+- **R² < 0.3**: Poor fit - warning issued, consider data quality
+
+**Residuals:**
+
+- **Mean ≈ 0**: Model is unbiased
+- **Normal distribution**: Model assumptions met
+- **Non-normal** (p < 0.05): May indicate outliers or model misspecification
+
+**Outliers (Cook's Distance):**
+
+- Cook's D > 4/n flags potentially influential points
+- **<10% outliers**: Typical, usually not problematic
+- **>10% outliers**: Warning issued, investigate data quality
+
+**Method Comparison:**
+
+- **Correlation > 0.9**: Excellent agreement
+- **Correlation 0.7-0.9**: Good agreement
+- **Correlation < 0.7**: Warning issued, investigate discrepancies
+
+## Advanced Topics
+
+### Understanding the 8 Candidate Models
+
+The function tests 8 different transformations of X (MAF) and Y (effect size measure):
+
+**X transformations:**
+
+1. $X = q$ (raw MAF)
+2. $f(X) = q(1-q)$ (heterozygosity/frequency function)
+3. $\log(X) = \log(q)$ (log MAF)
+4. $\log[f(X)] = \log[q(1-q)]$ (log frequency function)
+
+**Y transformations:**
+
+1. $Y$ (raw squared effect)
+2. $\log(Y)$ (log of squared effect)
+
+**Why multiple models?**
+
+Different genetic architectures produce different MAF-effect relationships:
+
+- **Rare variants with large effects**: $\log(Y) \sim \log(X)$ often fits well
+- **Common variants**: $Y \sim X$ or $Y \sim f(X)$ may be better
+- **Complex patterns**: Log transformations capture exponential relationships
+
+The function automatically selects the best-fitting model by R², but you can compare all models:
+
+```{r advanced-models, eval=FALSE}
+# Get full result with fitted model
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  return_full = TRUE
+)
+
+# See which model was selected
+cat("Selected model formula:\n")
+print(formula(result$model$models$beta_method))
+
+# Check R-squared
+cat(sprintf("\nR-squared: %.4f\n",
+    summary(result$model$models$beta_method)$r.squared))
+
+# Note: compare_B_models() has limited functionality in current implementation
+# It can only show the selected model, not re-fit all candidates
+# This is documented in the function's limitations
+```
+
+### When Estimates Differ Between Methods
+
+If direct beta and p-value methods give different results:
+
+**Common Causes:**
+
+1. **Different training data used**: Beta method uses different variants than p-value method
+2. **Target parameters**: Check `target_case_prop` or `target_SE` are correct
+3. **Sample size heterogeneity**: P-value method sensitive to varying N across studies
+4. **Winner's curse**: Published effect sizes may be inflated
+
+**What to do:**
+
+```{r estimates-differ, eval=FALSE}
+# If methods disagree, investigate:
+
+# 1. Check correlation (prediction comparison is under $model$comparison$prediction)
+pred_comp <- result$model$comparison$prediction
+if (pred_comp$correlation < 0.7) {
+  cat("Low correlation - investigate further\n")
+
+  # 2. Plot difference vs MAF
+  plot(target_MAF, result$B_beta_method - result$B_pvalue_method,
+       xlab = "MAF", ylab = "Difference", main = "Method Differences by MAF")
+  abline(h = 0, col = "red", lty = 2)
+  # Are differences systematic or random?
+
+  # 3. Check outliers
+  diag <- get_B_diagnostics(result, show_plots = FALSE)
+  if (diag$outliers$n_outliers > 0.1 * length(training_MAF)) {
+    cat("Many outliers detected - may affect fit\n")
+  }
+
+  # 4. Check model fit quality (models are in result$model$models)
+  cat(sprintf("Beta method R²: %.3f\n",
+      summary(result$model$models$beta_method)$r.squared))
+  cat(sprintf("Pvalue method R²: %.3f\n",
+      summary(result$model$models$pvalue_method)$r.squared))
+  # If one R² is much lower, that method may be unreliable
+}
+
+# Decision rule:
+# - High correlation + similar R²: Use either (prefer beta method)
+# - Low correlation + similar R²: Average the two
+# - Low correlation + different R²: Use method with higher R²
+# - Very low correlation: Investigate data quality issues
+```
+
+### Quality Control Considerations
+
+**Training Data QC:**
+
+Before running `get_B()`, ensure:
+
+```{r qc-training, eval=FALSE}
+# Check MAF range
+summary(training_MAF)
+stopifnot(all(training_MAF > 0 & training_MAF <= 0.5))
+
+# Check for missing values
+stopifnot(all(!is.na(training_MAF)))
+stopifnot(all(!is.na(training_BETA)))
+
+# Check effect sizes are reasonable
+hist(abs(training_BETA), breaks = 30, main = "Distribution of |BETA|")
+# Flag extremely large effects (potential errors)
+if (any(abs(training_BETA) > 2)) {
+  warning("Some effect sizes |BETA| > 2 - check for data errors")
+}
+
+# Check sample sizes
+if (!is.null(training_N)) {
+  summary(training_N)
+  # Recommend N > 500 for reliable estimates
+  if (any(training_N < 500)) {
+    warning(sprintf("%d variants from studies with N < 500", sum(training_N < 500)))
+  }
+}
+```
+
+**Target Data QC:**
+
+```{r qc-target, eval=FALSE}
+# Ensure MAF in valid range
+stopifnot(all(target_MAF > 0 & target_MAF <= 0.5))
+
+# Check target parameters are sensible
+if (!is.null(target_case_prop)) {
+  stopifnot(all(target_case_prop > 0 & target_case_prop < 1))
+  # For case-control: should be case proportion in STUDY, not population
+  if (any(target_case_prop < 0.001)) {
+    warning("Very low case proportions - verify this is case prop in study, not population prevalence")
+  }
+}
+
+if (!is.null(target_SE)) {
+  stopifnot(all(target_SE > 0))
+  # SE should be on same scale as training data
+}
+```
+
+### Handling Edge Cases
+
+**Very rare variants (MAF < 0.001):**
+
+```{r edge-rare, eval=FALSE}
+# Extrapolation to very rare MAF may be unreliable
+target_MAF_rare <- c(0.0001, 0.0005, 0.001)
+
+# Check if training data includes similarly rare variants
+min_training_MAF <- min(training_MAF)
+cat(sprintf("Minimum training MAF: %.5f\n", min_training_MAF))
+
+if (min(target_MAF_rare) < min_training_MAF) {
+  warning("Extrapolating to MAF rarer than training data - estimates may be unreliable")
+  # Consider: Use only target MAF within training range
+  target_MAF_safe <- target_MAF_rare[target_MAF_rare >= min_training_MAF]
+}
+```
+
+**Common variants (MAF > 0.4):**
+
+```{r edge-common, eval=FALSE}
+# Similar issue at upper end
+max_training_MAF <- max(training_MAF)
+cat(sprintf("Maximum training MAF: %.3f\n", max_training_MAF))
+
+# If target includes MAF > max training, consider limiting
+target_MAF_safe <- target_MAF[target_MAF <= max_training_MAF]
+```
+
+**Small training sample:**
+
+```{r edge-small, eval=FALSE}
+# With < 20 variants, model may overfit
+if (length(training_MAF) < 20) {
+  warning("Small training sample (N < 20) - consider simpler model")
+  # Simpler models: prefer Y ~ X or Y ~ f(X)
+  # Current implementation always tests all 8 models
+}
+
+# Recommendation: ≥ 50 variants for reliable fit
+if (length(training_MAF) < 50) {
+  cat("Note: Training N =", length(training_MAF), "- more data recommended\n")
+}
+```
+
+## Practical Recommendations
+
+### Best Practices for Data Preparation
+
+**1. Harmonize MAF:**
+
+```{r best-harmonize, eval=FALSE}
+# Ensure MAF ≤ 0.5 (not > 0.5)
+# If you have risk allele frequency (RAF), convert:
+harmonize_MAF <- function(freq) {
+  ifelse(freq > 0.5, 1 - freq, freq)
+}
+
+training_MAF <- harmonize_MAF(training_RAF)
+```
+
+**2. Remove duplicates:**
+
+```{r best-duplicates, eval=FALSE}
+# If multiple studies report same variant, keep largest study
+if (anyDuplicated(training_rsID)) {
+  # Order by sample size
+  training_data <- training_data[order(training_data$N, decreasing = TRUE), ]
+  # Remove duplicates
+  training_data <- training_data[!duplicated(training_data$rsID), ]
+}
+```
+
+**3. Apply sample size filter:**
+
+```{r best-samplesize, eval=FALSE}
+# Exclude small studies (N < 500)
+min_N <- 500
+keep_idx <- training_N >= min_N
+training_MAF <- training_MAF[keep_idx]
+training_BETA <- training_BETA[keep_idx]
+training_P <- training_P[keep_idx]
+training_N <- training_N[keep_idx]
+
+cat(sprintf("Retained %d/%d variants with N >= %d\n",
+            sum(keep_idx), length(keep_idx), min_N))
+```
+
+### Choosing Between Methods
+
+**Use Direct Beta Method when:**
+
+- Training and target traits are identical (e.g., both ALS)
+- Effect sizes (BETA) available
+- You want the most direct relationship
+- Training data is well-powered (N > 1000)
+
+**Use P-value Method when:**
+
+- Only p-values available (no BETA)
+- Cross-trait prediction (e.g., BMD → osteoporosis)
+- Training data from multiple studies with different scales
+- You want to leverage very large studies
+
+**Use Both Methods when:**
+
+- Same trait type AND both BETA and p-values available
+- You want to validate estimates
+- Preparing results for publication
+- Assessing robustness
+
+### Interpreting Results
+
+**Effect Size Magnitude:**
+
+```{r interpret-magnitude, eval=FALSE}
+# For binary traits (log odds ratios):
+# |B| < 0.1: Small effect
+# |B| 0.1-0.3: Moderate effect
+# |B| > 0.3: Large effect
+
+# For continuous traits (standardized):
+# |B| < 0.2: Small effect
+# |B| 0.2-0.5: Moderate effect
+# |B| > 0.5: Large effect
+
+# Check your results
+summary(B_estimates)
+hist(B_estimates, breaks = 30, main = "Distribution of Estimated B")
+
+# Flag extreme values
+extreme <- B_estimates > quantile(B_estimates, 0.99)
+if (any(extreme)) {
+  cat(sprintf("%d extreme B values detected (top 1%%)\n", sum(extreme)))
+  cat("MAFs with extreme B:", target_MAF[extreme], "\n")
+}
+```
+
+**MAF-Effect Relationship:**
+
+```{r interpret-relationship, eval=FALSE}
+# Typical patterns:
+# 1. Decreasing: B decreases as MAF increases (purifying selection)
+# 2. U-shaped: Lowest B at intermediate MAF
+# 3. Constant: B doesn't vary with MAF (neutral)
+
+# Plot to visualize
+plot(target_MAF, B_estimates, type = "l", lwd = 2,
+     xlab = "MAF", ylab = "B",
+     main = "Effect Size vs MAF Pattern")
+
+# Check monotonicity
+diffs <- diff(B_estimates)
+if (all(diffs < 0)) {
+  cat("Pattern: Monotonically decreasing (typical for deleterious variants)\n")
+} else if (all(diffs > 0)) {
+  cat("Pattern: Monotonically increasing (unusual - check data)\n")
+} else {
+  cat("Pattern: Non-monotonic\n")
+}
+```
+
+### Common Pitfalls to Avoid
+
+**1. Confusing case proportion with prevalence:**
+
+```{r pitfall-prevalence, eval=FALSE}
+# WRONG: Using population prevalence
+target_case_prop <- 0.00015  # ALS population prevalence
+# This is NOT what you want!
+
+# CORRECT: Using study case proportion
+# If you have 200 cases and 200 controls:
+n_cases <- 200
+n_controls <- 200
+target_case_prop <- n_cases / (n_cases + n_controls)  # = 0.5
+# This is the correct value to use
+```
+
+**2. Extrapolating beyond training range:**
+
+```{r pitfall-extrapolate, eval=FALSE}
+# Check training range
+range(training_MAF)
+# [1] 0.01 0.45
+
+# AVOID: Target MAF outside this range
+target_MAF_bad <- seq(0.0001, 0.5, length.out = 100)  # Goes to 0.0001
+
+# BETTER: Stay within training range
+target_MAF_good <- seq(0.01, 0.45, length.out = 100)
+```
+
+**3. Using wrong standard error:**
+
+```{r pitfall-se, eval=FALSE}
+# For continuous traits with p-value method:
+# SE should match the trait scale
+
+# WRONG: Using SE from different trait
+target_SE_wrong <- 0.001  # SE from height study
+# Applied to BMI estimation - scales don't match!
+
+# CORRECT: Use SE from target trait or similar trait
+target_SE_correct <- 0.05  # SE appropriate for BMI scale
+```
+
+**4. Ignoring diagnostics:**
+
+```{r pitfall-diagnostics, eval=FALSE}
+# DON'T just take B estimates blindly
+B <- get_B(...)  # Get estimates
+
+# DO check quality
+result <- get_B(..., return_full = TRUE)
+diag <- get_B_diagnostics(result)
+
+if (length(diag$qc_flags) > 0) {
+  cat("WARNING: Quality issues detected!\n")
+  # Investigate before using estimates
+}
+```
+
+## Summary and Recommendations
+
+### Quick Reference Guide
+
+**For beginners:**
+
+```{r summary-beginner, eval=FALSE}
+# Simplest approach - automatic method selection
+B <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,  # Or use training_P if no BETA
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.1  # Adjust for your study
+)
+```
+
+**For production analysis:**
+
+```{r summary-production, eval=FALSE}
+# Full workflow with QC and diagnostics
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "both",       # Compare methods
+  return_full = TRUE,    # Get full diagnostics
+  verbose = 2            # Informative output
+)
+
+# Check quality
+diag <- get_B_diagnostics(result, show_plots = TRUE)
+if (length(diag$qc_flags) == 0) {
+  cat("[OK] Ready for downstream analysis\n")
+  B_final <- result$B
+} else {
+  cat("[WARNING] Review quality issues before proceeding\n")
+}
+```
+
+### When to Use Which Method
+
+| Scenario | Method | Notes |
+|----------|--------|-------|
+| Same trait, BETA available | `method="beta"` or `"both"` | Direct beta preferred |
+| Same trait, no BETA | `method="pvalue"` | Only option |
+| Different traits | `method="pvalue"` | Only option |
+| Validation needed | `method="both"` | Compare for robustness |
+| Publication | `method="both"` | Show consistency |
+
+### Minimum Requirements
+
+**Training data:**
+
+- **N variants**: ≥ 50 recommended (20 minimum)
+- **Sample sizes**: ≥ 500 per study
+- **MAF range**: Should overlap with target MAF
+
+**Target data:**
+
+- **MAF range**: Within or close to training range
+- **Parameters**: Correctly specified (case_prop or SE)
+
+### Integration with GLOW Pipeline
+
+Use estimated B values in optimal weight calculation:
+
+```{r summary-integration, eval=FALSE}
+# 1. Estimate B
+B <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.1
+)
+
+# 2. Get variant-importance scores (PI)
+# (Assume you have these from annotation tools)
+PI <- c(0.1, 0.3, 0.05, 0.8, 0.2, 0.4, ...)  # One per variant
+
+# 3. Get correlation matrix M
+# (From LD or kinship matrix)
+M <- cor(genotype_matrix)  # Or from LD reference
+
+# 4. Calculate optimal weights
+g_identity <- function(x) x
+weights <- Optimal_Weights_M(g_identity, B, PI, M)
+
+# 5. Use weights in association test
+# (See other vignettes for GLOW test functions)
+```
+
+## See Also
+
+**Related Functions:**
+
+- `get_B()` - All-in-one effect size estimation (train + predict)
+- `train_B_model()` - Train model separately (returns `glow_B_model`)
+- `predict_B()` - Predict B from a trained model
+- `save_B_model()` / `load_B_model()` - Persist and reload trained models
+- `plot.glow_B_estimate()` / `plot.glow_B_model()` - Visualization methods
+- `get_B_diagnostics()` - Comprehensive diagnostic report
+- `compare_B_models()` - Model comparison tools
+- `select_best_model()` - Internal model selection
+
+**Related Vignettes:**
+
+- "Diagnostic Tools for B Estimation" - Detailed diagnostics
+- "Optimal Weight Calculation" - Using B in GLOW framework
+- "Complete GLOW Pipeline" - End-to-end workflow
+
+**References:**
+
+Zhang, H., Liu, M., Landers, J. E., & Wu, Z. Integrated Weighted Association Test with Application to Genetic Association Studies. *Annals of Applied Statistics* (in revision).
+
+## Session Information
+
+For reproducibility:
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```
