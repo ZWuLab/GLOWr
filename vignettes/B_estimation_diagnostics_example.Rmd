@@ -1,0 +1,389 @@
+---
+title: "Diagnostic Tools for B Estimation"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Diagnostic Tools for B Estimation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 10,
+  fig.height = 8
+)
+```
+
+## Introduction
+
+This vignette demonstrates the diagnostic and visualization tools for assessing the quality of effect size (B) estimation in the GLOW framework. These tools work with both `glow_B_estimate` objects (from `get_B()`) and `glow_B_model` objects (from `train_B_model()`). They help you:
+
+- Evaluate model fit quality
+- Detect potential outliers
+- Compare different estimation methods
+- Identify quality control issues
+
+## Basic Usage
+
+### Estimating B with Full Diagnostics
+
+First, run `get_B()` with `return_full = TRUE` to get a complete result object:
+
+```{r eval=FALSE}
+library(GLOWr)
+
+# Example: Estimate B for a set of variants
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = 0.1,
+  method = "both",        # Run both methods for comparison
+  return_full = TRUE,     # Get full result object
+  verbose = 2
+)
+```
+
+### Quick Visual Check
+
+The quickest way to assess quality is with the dashboard plot:
+
+```{r eval=FALSE}
+# Display 2x2 dashboard of diagnostic plots
+plot(result)
+```
+
+This creates a 2x2 layout showing:
+- Top-left: Fitted model vs training data
+- Top-right: Q-Q plot of residuals
+- Bottom-left: Residuals vs fitted values
+- Bottom-right: Method comparison (if both methods used) or Cook's distance
+
+### Comprehensive Diagnostics
+
+For a detailed diagnostic report:
+
+```{r eval=FALSE}
+# Generate comprehensive diagnostics
+# get_B_diagnostics() accepts both glow_B_estimate and glow_B_model objects
+diag <- get_B_diagnostics(result, show_plots = TRUE, verbose = 1)
+
+# The function automatically displays:
+# - Model fit statistics (R², Adjusted R²)
+# - Residual analysis
+# - Outlier detection results
+# - Method comparison (if applicable)
+# - Quality control flags
+```
+
+### Diagnostics with `train_B_model()`
+
+You can also run diagnostics on a standalone trained model (without predictions):
+
+```{r eval=FALSE}
+# Train a model
+b_model <- train_B_model(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  method = "beta"
+)
+
+# Plot model-level diagnostics (no target data needed)
+plot(b_model)
+plot(b_model, type = "fit")
+plot(b_model, type = "residuals")
+
+# Full diagnostic report from a trained model
+diag <- get_B_diagnostics(b_model, show_plots = TRUE)
+```
+
+## Visualization Options
+
+### Plot Types
+
+You can create specific plot types:
+
+```{r eval=FALSE}
+# Model fit plot only
+plot(result, type = "fit")
+
+# Residual diagnostic plots
+plot(result, type = "residuals")
+
+# Method comparison plots (requires both methods)
+plot(result, type = "comparison")
+
+# Dashboard (default)
+plot(result, type = "all")
+```
+
+### Method Comparison Plot
+
+When both methods are used, the comparison plot shows:
+
+```{r eval=FALSE}
+plot(result, type = "comparison")
+```
+
+This creates a 2x2 layout with:
+1. Scatterplot: Beta method vs P-value method
+2. Bland-Altman plot: Difference vs average
+3. Percent difference vs average
+4. Distribution of differences
+
+## Interpreting Diagnostics
+
+### Model Fit Statistics
+
+The diagnostic report provides several measures of model quality:
+
+```{r eval=FALSE}
+diag <- get_B_diagnostics(result, show_plots = FALSE, verbose = 0)
+
+# R-squared: Proportion of variance explained
+# Diagnostics use short names: $beta and $pvalue (not $beta_method)
+diag$model_fit$beta$R2       # Higher is better (>0.5 preferred)
+
+# Adjusted R-squared: Accounts for model complexity
+diag$model_fit$beta$adj_R2   # Higher is better
+
+# Model formula
+diag$model_fit$beta$formula  # Shows transformation used
+```
+
+**Interpretation:**
+- **R² > 0.5**: Good fit
+- **R² 0.3-0.5**: Moderate fit (may benefit from more data)
+- **R² < 0.3**: Poor fit (warning issued)
+
+### Residual Analysis
+
+Check residual behavior:
+
+```{r eval=FALSE}
+# Residual statistics
+diag$residual_stats$mean       # Should be ~0
+diag$residual_stats$sd         # Spread of residuals
+diag$residual_stats$normality_p # Shapiro-Wilk test p-value
+
+# Non-normal residuals (p < 0.05) suggest:
+# - Transformation may be inappropriate
+# - Outliers present
+# - Non-linear relationship
+```
+
+### Outlier Detection
+
+Identify potentially influential observations:
+
+```{r eval=FALSE}
+# Number of outliers detected
+diag$outliers$n_outliers
+
+# Proportion of data
+diag$outliers$proportion  # Warning if >10%
+
+# Which observations are outliers
+diag$outliers$indices
+
+# Cook's distance values
+diag$outliers$cooks_d
+```
+
+**What to do about outliers:**
+1. Investigate whether they are data errors
+2. Check if they represent real biological phenomena
+3. Consider robustness of results with/without them
+4. Document decisions about handling outliers
+
+### Method Comparison
+
+When both methods are used:
+
+```{r eval=FALSE}
+# Correlation between methods
+diag$method_comparison$correlation  # Should be >0.7
+
+# Root mean squared error
+diag$method_comparison$rmse
+
+# Percent differences
+diag$method_comparison$mean_percent_diff
+diag$method_comparison$max_percent_diff
+```
+
+**Interpretation:**
+- **High correlation (>0.9)**: Methods agree well
+- **Moderate correlation (0.7-0.9)**: Reasonable agreement
+- **Low correlation (<0.7)**: Methods disagree (warning issued)
+
+**Note**: Large percent differences can occur even with high correlation because methods operate on different scales. Focus on correlation.
+
+### Quality Control Flags
+
+The diagnostic report automatically identifies potential issues:
+
+```{r eval=FALSE}
+# Check for QC issues
+if (length(diag$qc_flags) > 0) {
+  cat("Quality Control Issues:\n")
+  for (flag in diag$qc_flags) {
+    cat("  -", flag, "\n")
+  }
+}
+```
+
+Common flags:
+- "Low R²": Model explains <30% of variance
+- "Non-normal residuals": May indicate model misspecification
+- "High proportion of outliers": >10% of data flagged
+- "Low correlation between methods": Methods disagree
+
+## Model Comparison
+
+Compare different candidate models:
+
+```{r eval=FALSE}
+# Compare all candidate models
+model_comp <- compare_B_models(
+  result,
+  which_method = "beta",
+  criterion = "R2",
+  plot = TRUE
+)
+
+# View results
+print(model_comp)
+```
+
+**Note**: Current implementation has limited functionality. It shows the selected model but cannot re-fit all 8 candidates without original training data. This is a known limitation documented in the code.
+
+## Complete Example
+
+Here's a complete workflow:
+
+```{r eval=FALSE}
+# 1. Load data
+als_data <- readRDS("path/to/ALS_data.rds")
+training_data <- als_data$data
+
+# 2. Extract required fields
+training_MAF <- training_data$MAF
+training_BETA <- training_data$BETA
+training_P <- training_data$P
+training_N <- training_data$N
+
+# Remove any invalid values
+valid_idx <- complete.cases(data.frame(training_MAF, training_BETA, training_P, training_N)) &
+             training_MAF > 0 & training_MAF < 1 &
+             abs(training_BETA) > 1e-10
+
+training_MAF <- training_MAF[valid_idx]
+training_BETA <- training_BETA[valid_idx]
+training_P <- training_P[valid_idx]
+training_N <- training_N[valid_idx]
+
+# 3. Define target variants
+target_MAF <- seq(0.01, 0.4, by = 0.05)
+target_case_prop <- 0.001  # ALS prevalence
+
+# 4. Estimate B with both methods
+result <- get_B(
+  training_trait = "binary",
+  training_MAF = training_MAF,
+  training_BETA = training_BETA,
+  training_P = training_P,
+  training_N = training_N,
+  target_trait = "binary",
+  target_MAF = target_MAF,
+  target_case_prop = target_case_prop,
+  method = "both",
+  return_full = TRUE,
+  verbose = 2
+)
+
+# 5. Visual diagnostics
+plot(result)
+
+# 6. Detailed diagnostics
+diag <- get_B_diagnostics(result, show_plots = TRUE)
+
+# 7. Check for issues
+if (length(diag$qc_flags) > 0) {
+  cat("Issues detected:\n")
+  print(diag$qc_flags)
+}
+
+# 8. Use the estimates
+B_estimates <- result$B  # Primary estimates
+# Use these in optimal weight calculation...
+```
+
+## Recommendations
+
+### For Publication-Quality Analysis
+
+1. **Always use both methods** (when data permits) to validate estimates
+2. **Document QC decisions** about outliers and model selection
+3. **Report model fit statistics** (R², Adjusted R²) in methods section
+4. **Include diagnostic plots** in supplementary materials
+5. **Check correlation between methods** - high correlation supports validity
+
+### For Exploratory Analysis
+
+1. **Start with dashboard plot** for quick assessment
+2. **Run full diagnostics** to identify issues
+3. **Investigate outliers** - are they real or errors?
+4. **Compare methods** if both available
+5. **Consider sensitivity analysis** with/without outliers
+
+### When Things Go Wrong
+
+If diagnostics reveal issues:
+
+1. **Low R²**:
+   - Check if you have enough training data (>50 variants recommended)
+   - Consider whether MAF-effect size relationship is expected
+   - Try different model selections (though current interface is limited)
+
+2. **Many outliers**:
+   - Verify data quality
+   - Check for population stratification
+   - Consider biological reasons (e.g., large effect variants in specific genes)
+
+3. **Methods disagree**:
+   - Check that you're using appropriate trait types
+   - Verify SE or case_prop values are correct
+   - Consider whether cross-trait transfer is appropriate
+
+4. **Non-normal residuals**:
+   - May indicate model misspecification
+   - Check for outliers
+   - Consider if relationship is truly monotonic
+
+## Summary
+
+The diagnostic tools provide:
+- **Visual assessment** through multiple plot types
+- **Quantitative metrics** for model quality
+- **Automatic QC flagging** of potential issues
+- **Method comparison** when multiple approaches used
+
+Use these tools to ensure your B estimates are reliable and appropriate for downstream GLOW analyses.
+
+## See Also
+
+- `?get_B` - All-in-one B estimation (train + predict)
+- `?train_B_model` - Train B estimation model separately
+- `?predict_B` - Predict B from a trained model
+- `?plot.glow_B_estimate` - Plot method for estimation results
+- `?plot.glow_B_model` - Plot method for trained models
+- `?get_B_diagnostics` - Diagnostic function (accepts both classes)
+- `?compare_B_models` - Model comparison documentation

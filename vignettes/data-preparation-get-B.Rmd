@@ -1,0 +1,1246 @@
+---
+title: "Data Preparation for B Estimation"
+author: "GLOWr Package"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Data Preparation for B Estimation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  eval = FALSE  # Set to TRUE when package data is available
+)
+```
+
+## Introduction
+
+The `prepare_B_training_data()` function provides a comprehensive pipeline for preparing GWAS summary statistics for use in B parameter estimation via `get_B()`. This vignette demonstrates how to load, standardize, filter, and validate GWAS data from various sources and formats.
+
+### What This Function Does
+
+The data preparation pipeline handles:
+
+- **Multiple file formats**: Excel (.xlsx, .xls), CSV, TSV, and R data frames
+- **Smart column detection**: Automatically recognizes 100+ variations of standard column names
+- **Intelligent data conversions**: Extracts numeric values from text, converts OR to BETA, handles -log10(P)
+- **Trait type detection**: Sophisticated per-row detection for mixed-trait datasets
+- **Flexible filtering**: Filter by study name, PMID, chromosome, or any custom field
+- **Quality control**: Sample size thresholds, P-value filters, MAF ranges, duplicate removal
+- **Complete validation**: Ensures data meets requirements for B estimation
+
+### Key Features
+
+- **Fully automated**: Minimal user input required for standard GWAS formats
+- **Highly customizable**: Override any default behavior with explicit parameters
+- **Transparent processing**: Complete metadata tracking of all transformations
+- **Publication-ready**: Produces standardized, validated datasets
+
+---
+
+## Quick Start
+
+### Basic Usage
+
+Load GWAS data with minimal parameters:
+
+```{r quickstart-basic}
+library(GLOWr)
+
+# Load data from Excel file
+gwas_data <- prepare_B_training_data(
+  data = "my_gwas_results.xlsx",
+  trait_type = "binary",
+  verbose = 2
+)
+
+# View the results
+print(gwas_data)
+```
+
+The function returns an S3 object with two components:
+
+- `data`: Cleaned, standardized data frame ready for `get_B()`
+- `metadata`: Complete record of processing steps and conversions applied
+
+### Supported Data Formats
+
+```{r formats}
+# Excel files (.xlsx, .xls)
+data_excel <- prepare_B_training_data(
+  data = "gwas_summary.xlsx",
+  trait_type = "continuous"
+)
+
+# CSV files
+data_csv <- prepare_B_training_data(
+  data = "gwas_summary.csv",
+  trait_type = "binary"
+)
+
+# TSV files
+data_tsv <- prepare_B_training_data(
+  data = "gwas_summary.tsv",
+  trait_type = "continuous"
+)
+
+# R data frames (already loaded)
+my_df <- read.csv("gwas_data.csv")
+data_df <- prepare_B_training_data(
+  data = my_df,
+  trait_type = "binary"
+)
+```
+
+---
+
+## Column Mapping
+
+### Automatic Column Detection
+
+The function automatically recognizes over 100 variations of standard column names:
+
+| Standard Name | Common Variations |
+|---------------|-------------------|
+| `rsID` | SNP, SNPS, RSID, RS_ID, VARIANT_ID, ID, MARKERNAME |
+| `CHR` | CHR, CHROM, CHROMOSOME, CHR_ID, #CHR |
+| `POS` | POS, POSITION, BP, CHR_POS, BASE_PAIR_LOCATION |
+| `MAF` | MAF, RAF, FREQ, EAF, AF, RISK.ALLELE.FREQUENCY |
+| `P` | P, PVALUE, P_VALUE, P.VALUE, P-VALUE, PVAL |
+| `N` | N, SAMPLE_SIZE, SAMPLE.SIZE, N_TOTAL, NEFF |
+| `BETA` | BETA, EFFECT, EFFECT_SIZE, B, BETA_NUMERIC |
+| `OR` | OR, ODDS_RATIO, ODDSRATIO |
+
+### Custom Column Mapping
+
+Override automatic detection when your column names are non-standard:
+
+```{r column-mapping}
+# Specify custom mappings
+data <- prepare_B_training_data(
+  data = "my_gwas.xlsx",
+  trait_type = "continuous",
+  column_mapping = list(
+    rsID = "SNP_ID",              # Your column: "SNP_ID" -> Standard: "rsID"
+    CHR = "CHROMOSOME",           # Your column: "CHROMOSOME" -> Standard: "CHR"
+    MAF = "FREQ",                 # Your column: "FREQ" -> Standard: "MAF"
+    P = "PVALUE",                 # Your column: "PVALUE" -> Standard: "P"
+    N = "SAMPLE_SIZE",            # Your column: "SAMPLE_SIZE" -> Standard: "N"
+    BETA = "Effect_Size"          # Your column: "Effect_Size" -> Standard: "BETA"
+  ),
+  verbose = 2
+)
+```
+
+**Note**: Unmapped columns are retained in the output with their original names.
+
+---
+
+## Trait Type Detection
+
+### How the trait_type Parameter Works
+
+The function provides sophisticated per-row trait type detection:
+
+- **`trait_type = NULL`** (default): Auto-detect each row based on evidence signals
+- **`trait_type = "binary"` or `"continuous"`**:
+  - Serves as default for rows with insufficient evidence ("unknown")
+  - **High-confidence signals override this default** (e.g., if OR column is present,
+    the variant is classified as binary regardless of your trait_type setting)
+- **Result**: A TRAIT_TYPE column is added to output with per-variant classifications
+
+**Important**: High-confidence detection signals (like presence of OR values or
+Case/Control sizes) take precedence over user-specified trait_type. The user
+setting only applies when evidence is weak or absent.
+
+### Overview
+
+The function includes sophisticated **per-row trait type detection** that can handle mixed-trait datasets (e.g., GWAS Catalog data containing both binary and continuous traits). Each variant is classified individually based on available evidence.
+
+### Detection Signals
+
+The function uses multiple evidence sources in order of decreasing confidence:
+
+#### High Confidence Binary Indicators
+
+1. **OR column with value** (excluding ambiguous names like "OR.or.BETA")
+   - Presence of odds ratio strongly indicates binary trait
+
+2. **Case Size + Control Size columns both present**
+   - Unambiguous indicator of case-control study
+
+3. **Disease name in trait column**
+   - Keywords: sclerosis, diabetes, cancer, carcinoma, tumor, disease, disorder, syndrome, osteoporosis, arthritis, alzheimer, parkinson, asthma, schizophrenia, depression, hypertension, coronary, stroke, infection, etc.
+
+4. **"Susceptibility" keyword in annotations**
+   - Indicates genetic susceptibility to disease
+
+#### High Confidence Continuous Indicators
+
+1. **Quantitative trait name**
+   - Keywords: bone mineral density, BMD, BMI, height, weight, LDL, HDL, cholesterol, triglyceride, glucose, blood pressure, waist, hip ratio, lung function, etc.
+
+2. **BETA present with no binary indicators**
+   - Lower confidence; only used when OR column absent or ambiguous
+
+### Conservative Approach
+
+- **Defaults to "unknown"** when evidence is insufficient
+- Prioritizes avoiding false classifications over complete classification
+- Users can override with explicit `trait_type` parameter
+
+### Usage Examples
+
+#### Auto-detect mixed GWAS Catalog data
+
+```{r trait-type-auto}
+# Let function detect trait type per row
+result <- prepare_B_training_data(
+  data = "gwas_catalog.csv",
+  trait_type = NULL,  # Auto-detect per row
+  verbose = 2
+)
+
+# Check distribution of detected trait types
+table(result$data$TRAIT_TYPE)
+#   binary continuous unknown
+#       45         30       0
+```
+
+#### Override with default for unknown cases
+
+```{r trait-type-override}
+# Provide default for uncertain cases
+result <- prepare_B_training_data(
+  data = "my_data.csv",
+  trait_type = "binary",  # Used as default for "unknown" cases only
+  verbose = 2
+)
+
+# High-confidence continuous traits still detected despite default
+```
+
+#### ALS data (automatically detects binary)
+
+```{r trait-type-als}
+als_result <- prepare_B_training_data(
+  data = "ALS-known-SNPs.xlsx",
+  trait_type = NULL,
+  verbose = 2
+)
+
+# Result: All variants correctly detected as binary
+# Signals used: Case Size + Control Size, trait name "sclerosis", OR values
+```
+
+### Important Notes on Detection
+
+**When Detection is Reliable:**
+
+- Clear binary indicators (OR values, Case+Control, disease names)
+- Well-known quantitative traits (BMI, BMD, height)
+- Standard GWAS Catalog format
+
+**When to Verify Manually:**
+
+- Custom datasets with non-standard column names
+- Ambiguous trait names
+- Novel or rare phenotypes not in knowledge base
+- Many variants classified as "unknown"
+
+**Detection Limitations:**
+
+- This detection is robust but **NOT 100% accurate**
+- Manual verification recommended for critical analyses
+- Less critical when using P-value-based (vs. BETA-based) methods for B estimation
+
+---
+
+## Quality Control Filtering
+
+### Default QC Filters
+
+The function applies the following quality control filters by default:
+
+```{r qc-defaults}
+# Default QC filters
+default_qc <- list(
+  min_sample_size = 500,       # Minimum N
+  max_pvalue = 1,              # Maximum P (no filter by default)
+  min_maf = 0,                 # Minimum MAF (no filter by default)
+  remove_duplicates = TRUE,    # Remove duplicate variants
+  duplicate_priority = "N",    # Keep variant with largest N
+  remove_na = TRUE,            # Remove rows with NA
+  remove_na_cols = c("MAF", "P", "N")  # Columns that must be non-NA
+)
+```
+
+### Customizing QC Filters
+
+#### Stricter QC
+
+```{r qc-strict}
+# More stringent filtering
+data <- prepare_B_training_data(
+  data = "gwas_data.xlsx",
+  trait_type = "continuous",
+  qc_filters = list(
+    min_sample_size = 5000,      # Require larger studies
+    max_pvalue = 5e-8,           # Genome-wide significance only
+    min_maf = 0.01,              # Remove rare variants
+    remove_duplicates = TRUE,
+    remove_na = TRUE,
+    remove_na_cols = c("MAF", "P", "N", "BETA")  # Also require BETA
+  ),
+  verbose = 2
+)
+```
+
+#### More Lenient QC
+
+```{r qc-lenient}
+# Minimal filtering
+data <- prepare_B_training_data(
+  data = "gwas_data.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 100,       # Accept smaller studies
+    max_pvalue = 1,              # No P-value filter
+    min_maf = 0,                 # Include all MAFs
+    remove_duplicates = TRUE,
+    remove_na = TRUE,
+    remove_na_cols = c("MAF", "P", "N")  # Only basic required columns
+  ),
+  verbose = 2
+)
+```
+
+### Understanding NA Filtering
+
+The `remove_na_cols` parameter specifies which columns must have non-NA values:
+
+```{r qc-na}
+# Example: Require both BETA and P to be non-NA
+data <- prepare_B_training_data(
+  data = "gwas_data.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    remove_na = TRUE,
+    remove_na_cols = c("MAF", "P", "N", "BETA")  # All four must be non-NA
+  ),
+  verbose = 2
+)
+```
+
+### Duplicate Removal
+
+Duplicates are removed by **both rsID and genomic position (CHR:POS)**:
+
+```{r qc-duplicates}
+# Duplicates removed, keeping highest N
+data <- prepare_B_training_data(
+  data = "gwas_with_duplicates.xlsx",
+  trait_type = "continuous",
+  qc_filters = list(
+    remove_duplicates = TRUE,
+    duplicate_priority = "N"  # Keep variant with largest sample size
+  ),
+  verbose = 2
+)
+```
+
+**How it works:**
+
+1. Removes duplicate rsIDs (keeps highest N)
+2. Removes duplicate CHR:POS positions (keeps highest N)
+3. Reports number removed in each category
+
+---
+
+## General Field-Based Filtering
+
+### Overview
+
+The flexible filtering system allows you to filter on **any column** in your data, not just standard GWAS columns. This is useful for:
+
+- Selecting specific studies or publications
+- Excluding overlapping samples
+- Filtering by ancestry, trait, annotation, or custom fields
+
+### Inclusion Filters
+
+Keep only rows matching specified values:
+
+```{r filter-include-studies}
+# Include only specific studies
+bmd_data <- prepare_B_training_data(
+  data = "bmd_gwas.xlsx",
+  trait_type = "continuous",
+  filter_include = list(
+    STUDY = c("Atlas", "153 new loci", "613 new loci")
+  ),
+  verbose = 2
+)
+```
+
+```{r filter-include-chr}
+# Include only autosomes
+data <- prepare_B_training_data(
+  data = "gwas_data.csv",
+  trait_type = "binary",
+  filter_include = list(
+    CHR = 1:22  # Chromosomes 1-22 only
+  ),
+  verbose = 2
+)
+```
+
+### Exclusion Filters
+
+Remove rows matching specified values:
+
+```{r filter-exclude-pmid}
+# Exclude specific publications (to avoid overlapping samples)
+data <- prepare_B_training_data(
+  data = "my_gwas.csv",
+  trait_type = "binary",
+  filter_exclude = list(
+    PMID = c("12345678", "87654321")  # Exclude these PMIDs
+  ),
+  verbose = 2
+)
+```
+
+```{r filter-exclude-trait}
+# Exclude specific trait annotations
+als_data <- prepare_B_training_data(
+  data = "ALS-known-SNPs.xlsx",
+  trait_type = "binary",
+  filter_exclude = list(
+    `Reported trait` = c(
+      "Amyotrophic lateral sclerosis (C9orf72 mutation interaction)",
+      "Amyotrophic lateral sclerosis (age of onset)",
+      "Survival in sporadic amyotrophic lateral sclerosis"
+    ),
+    `P-value annotation` = c("(age of onset)", "(survival)", "(site of onset)")
+  ),
+  verbose = 2
+)
+```
+
+### Pattern Matching vs. Exact Matching
+
+```{r filter-pattern}
+# Pattern matching (default)
+data <- prepare_B_training_data(
+  data = "gwas_catalog.csv",
+  trait_type = "binary",
+  filter_include = list(
+    STUDY = "diabetes"  # Matches "Type 2 diabetes", "Diabetes mellitus", etc.
+  ),
+  filter_pattern = TRUE,  # Use grepl for character columns
+  verbose = 2
+)
+
+# Exact matching
+data <- prepare_B_training_data(
+  data = "gwas_catalog.csv",
+  trait_type = "binary",
+  filter_include = list(
+    STUDY = "Type 2 diabetes"  # Exact match only
+  ),
+  filter_pattern = FALSE,  # Use %in% for exact matching
+  verbose = 2
+)
+```
+
+### Combined Filtering
+
+Combine inclusion and exclusion filters:
+
+```{r filter-combined}
+# Complex filtering scenario
+data <- prepare_B_training_data(
+  data = "gwas_catalog.csv",
+  trait_type = "binary",
+  filter_include = list(
+    CHR = 1:22,                 # Autosomes only
+    STUDY = c("Study1", "Study2", "Study3")  # Specific studies
+  ),
+  filter_exclude = list(
+    PMID = c("11111111", "22222222"),  # Exclude overlapping publications
+    Population = "Asian"                # Exclude specific ancestry
+  ),
+  filter_pattern = TRUE,
+  verbose = 2
+)
+```
+
+**Note**: Inclusion filters take precedence over exclusion filters for the same column.
+
+---
+
+## Data Conversions
+
+### Overview
+
+The function performs intelligent data conversions automatically to handle real-world GWAS data formats:
+
+1. Extract sample sizes from text descriptions
+2. Extract P-values from text (scientific notation)
+3. Convert -log10(P) to P-values
+4. Convert OR to log(OR) for binary traits
+5. Harmonize MAF values (MAF > 0.5 becomes 1 - MAF)
+6. Convert CHR to numeric (X→23, Y→24, MT→25, then filter to autosomes only)
+
+### Sample Size Extraction from Text
+
+```{r conversion-sample-size}
+# Handles text-based sample sizes
+data <- prepare_B_training_data(
+  data = "gwas_with_text.xlsx",
+  trait_type = "continuous",
+  extract_text_values = TRUE,  # Default
+  verbose = 2
+)
+
+# Conversions applied:
+# "66,420 European ancestry men" -> 66420
+# "5,000 cases + 5,000 controls" -> 10000
+# "2,678 Icelandic cases" -> 2678
+```
+
+### P-value Extraction from Text
+
+```{r conversion-pvalue}
+# Handles various P-value formats
+data <- prepare_B_training_data(
+  data = "gwas_with_special_chars.xlsx",
+  trait_type = "binary",
+  extract_text_values = TRUE,
+  verbose = 2
+)
+
+# Conversions applied:
+# "5x10^-8" -> 5e-8
+# "5E-8" -> 5e-8
+# "< 0.001" -> 0.001 (conservative)
+```
+
+### -log10(P) to P-value Conversion
+
+```{r conversion-mlog-p}
+# Automatically detects and converts PVALUE_MLOG column
+data <- prepare_B_training_data(
+  data = "gwas_with_mlog_p.xlsx",
+  trait_type = "continuous",
+  verbose = 2
+)
+
+# Conversion: P = 10^(-PVALUE_MLOG)
+# PVALUE_MLOG = 8 -> P = 1e-8
+```
+
+### OR to BETA Conversion
+
+```{r conversion-or}
+# Automatically converts OR to log(OR) for binary traits
+data <- prepare_B_training_data(
+  data = "case_control_study.xlsx",
+  trait_type = "binary",
+  convert_or_to_beta = TRUE,  # Default for binary traits
+  verbose = 2
+)
+
+# Conversion: BETA = log(OR)
+# OR = 1.5 -> BETA = log(1.5) = 0.405
+```
+
+### MAF Harmonization
+
+```{r conversion-maf}
+# MAF values > 0.5 automatically converted to 1 - MAF
+data <- prepare_B_training_data(
+  data = "gwas_data.xlsx",
+  trait_type = "continuous",
+  verbose = 2
+)
+
+# Example: MAF = 0.8 -> MAF = 0.2
+```
+
+**Performed automatically in Step 6 of the pipeline (before QC filtering):**
+
+MAF values > 0.5 are automatically converted to 1 - MAF to ensure all
+frequency values represent the minor (less common) allele. This happens
+before any QC filters are applied, ensuring your `min_maf` threshold works
+correctly.
+
+### Chromosome Encoding
+
+**Automatic Processing:**
+
+The function automatically handles various chromosome encodings:
+
+1. Recognizes sex chromosomes: "X", "chrX", "chr23" → identified as X
+2. Recognizes Y chromosomes: "Y", "chrY", "chr24" → identified as Y
+3. Recognizes mitochondrial: "MT", "M", "chr25", "chrMT" → identified as MT
+4. **Removes all non-autosomal variants (keeps only CHR 1-22)**
+5. **Final dataset contains ONLY autosomes (chromosomes 1-22)**
+
+This filtering is automatic and cannot be disabled.
+
+```{r conversion-chr}
+# Example: Chromosome encoding is handled automatically
+data <- prepare_B_training_data(
+  data = "gwas_with_chr_names.xlsx",
+  trait_type = "binary",
+  verbose = 2
+)
+
+# The function automatically:
+# - Recognizes and converts various chromosome formats
+# - Removes all non-autosomal chromosomes (X, Y, MT)
+# - Retains only chromosomes 1-22
+```
+
+### Disabling Conversions
+
+```{r conversion-disable}
+# Disable automatic conversions if needed
+data <- prepare_B_training_data(
+  data = "gwas_data.xlsx",
+  trait_type = "binary",
+  convert_or_to_beta = FALSE,     # Don't convert OR to BETA
+  extract_text_values = FALSE,    # Don't extract from text
+  verbose = 2
+)
+```
+
+---
+
+## Advanced Usage and Examples
+
+### Example 1: ALS GWAS Data (Binary Trait)
+
+**Note**: The example files referenced below are not included in the package.
+Replace file paths with your own GWAS data files. The code structure and
+parameters shown are realistic and can be adapted to your data.
+
+Complete workflow for ALS data with BETA-based B estimation:
+
+```{r example-als, eval=FALSE}
+library(GLOWr)
+
+# Load and prepare ALS data
+als_data <- prepare_B_training_data(
+  data = "ALS-known-SNPs.xlsx",
+  trait_type = "binary",
+  column_mapping = list(
+    BETA = "Beta_numeric"  # File has both "Beta" and "Beta_numeric"
+  ),
+  filter_exclude = list(
+    `Reported trait` = c(
+      "Amyotrophic lateral sclerosis (C9orf72 mutation interaction)",
+      "Amyotrophic lateral sclerosis (age of onset)",
+      "Survival in sporadic amyotrophic lateral sclerosis"
+    ),
+    `P-value annotation` = c("(age of onset)", "(survival)", "(site of onset)")
+  ),
+  qc_filters = list(
+    min_sample_size = 500,
+    remove_duplicates = TRUE,
+    remove_na = TRUE,
+    remove_na_cols = c("MAF", "P", "N", "BETA")  # BETA required for ALS
+  ),
+  verbose = 2
+)
+
+# Check the results
+print(als_data)
+# GLOW Training Data for B Estimation
+# ====================================
+# Metadata:
+#   Trait type:        binary
+#   Data format:       excel
+#   Variants:         143 (209 removed during QC)
+#   Date prepared:     2025-11-16
+
+# View data
+head(als_data$data[, 1:8])
+#                      rsID CHR       POS MAF     P    N  BETA TRAIT_TYPE
+# 1              rs2364403   1 155957961 0.2 1e-06 4243    NA     binary
+# 2  rs3177980 (rs1131498)   1 169707345 0.3 4e-06 4079 0.509     binary
+# 3              rs1541160   1 170026661 0.3 2e-08 4079 0.580     binary
+
+# Use for B estimation with BETA method
+B_estimates <- get_B(
+  training_trait = "binary",
+  training_MAF = als_data$data$MAF,
+  training_BETA = als_data$data$BETA[!is.na(als_data$data$BETA)],
+  training_P = als_data$data$P,
+  training_N = als_data$data$N,
+  target_trait = "binary",
+  target_MAF = seq(0.01, 0.4, by = 0.05),
+  target_case_prop = 0.258
+)
+```
+
+### Example 2: BMD GWAS Data (Continuous Trait)
+
+**Note**: Replace example file path with your own data file. The filtering
+approach shown (inclusion by study keywords) works with any dataset containing
+a study identifier column.
+
+Complete workflow for BMD data with P-value-based B estimation:
+
+```{r example-bmd, eval=FALSE}
+library(GLOWr)
+
+# Load and prepare BMD data
+bmd_data <- prepare_B_training_data(
+  data = "literature_snps_filtered.xlsx",
+  trait_type = "continuous",
+  filter_include = list(
+    STUDY = c("Atlas", "153 new loci", "613 new loci")
+  ),
+  qc_filters = list(
+    min_sample_size = 1000,
+    remove_duplicates = TRUE,
+    remove_na = TRUE,
+    remove_na_cols = c("MAF", "P", "N")  # BETA not required for P-value method
+  ),
+  extract_text_values = TRUE,  # Extract N from text
+  verbose = 2
+)
+
+# Check the results
+print(bmd_data)
+# GLOW Training Data for B Estimation
+# ====================================
+# Metadata:
+#   Trait type:        continuous
+#   Data format:       excel
+#   Variants:         599 (2071 removed during QC)
+#   Date prepared:     2025-11-16
+
+# Check metadata for conversions applied
+bmd_data$metadata$conversions_applied
+# $text_to_N
+# [1] TRUE
+#
+# $OR_to_BETA
+# [1] FALSE
+
+# Use for B estimation with P-value method (no BETA needed)
+B_estimates <- get_B(
+  training_trait = "continuous",
+  training_MAF = bmd_data$data$MAF,
+  training_P = bmd_data$data$P,
+  training_N = bmd_data$data$N,
+  target_trait = "continuous",
+  target_MAF = seq(0.01, 0.4, by = 0.05),
+  target_SE = 0.15
+)
+```
+
+### Example 3: Custom Workflow with Manual Filtering
+
+Multi-step workflow with custom filtering and inspection:
+
+```{r example-custom, eval=FALSE}
+library(GLOWr)
+
+# Step 1: Load data with lenient QC to examine
+gwas_data_all <- prepare_B_training_data(
+  data = "my_gwas.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 50,     # Very lenient
+    max_pvalue = 1,
+    min_maf = 0,
+    remove_duplicates = TRUE
+  ),
+  verbose = 2
+)
+
+# Step 2: Examine data distributions
+summary(gwas_data_all$data$N)
+summary(gwas_data_all$data$P)
+summary(gwas_data_all$data$MAF)
+
+# Step 3: Apply stricter QC based on inspection
+gwas_data_clean <- prepare_B_training_data(
+  data = "my_gwas.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 2000,    # Decided based on data
+    max_pvalue = 5e-8,         # Genome-wide significant
+    min_maf = 0.01,            # Common variants
+    remove_duplicates = TRUE
+  ),
+  exclude_studies = c("Pilot Study"),
+  verbose = 2
+)
+
+# Step 4: Examine QC summary
+gwas_data_clean$metadata$qc_summary
+# Shows exactly how many variants removed at each step
+
+# Step 5: Further manual filtering if needed
+clean_data <- gwas_data_clean$data[
+  gwas_data_clean$data$MAF > 0.05 &     # Even more common
+  gwas_data_clean$data$P < 1e-10,       # Even more significant
+]
+
+# Step 6: Use for B estimation
+B_estimates <- get_B(
+  training_trait = "binary",
+  training_MAF = clean_data$MAF,
+  training_BETA = clean_data$BETA,
+  training_P = clean_data$P,
+  training_N = clean_data$N,
+  target_trait = "binary",
+  target_MAF = seq(0.01, 0.5, by = 0.01),
+  target_case_prop = 0.5
+)
+```
+
+---
+
+## Two Approaches to Data Preparation
+
+The GLOWr package provides **two valid approaches** for preparing GWAS data for B estimation. Both approaches produce identical results but serve different use cases.
+
+### Approach 1: Universal Function (Recommended for Most Users)
+
+The `prepare_B_training_data()` function provides a **general-purpose, parameter-driven approach** that works with any GWAS dataset format. This is the recommended approach for most users.
+
+**Advantages:**
+- One function handles all datasets
+- Highly flexible parameter system
+- Easy to adapt to new data formats
+- Well-documented and maintained
+- Comprehensive QC and validation
+
+**Example:**
+
+```{r approach-universal, eval=FALSE}
+library(GLOWr)
+
+# Process ALS data using universal function
+als_result <- prepare_B_training_data(
+  data = "ALS-known-SNPs.xlsx",
+  trait_type = "binary",
+  column_mapping = list(
+    BETA = "Beta_numeric",
+    MAF = "RAF",
+    P = "P-value",
+    N = "Sample Size",
+    rsID = "rsID",
+    CHR = "chr",
+    POS = "pos_GRCh37"
+  ),
+  filter_exclude = list(
+    `Reported trait` = c(
+      "Amyotrophic lateral sclerosis (C9orf72 mutation interaction)",
+      "Amyotrophic lateral sclerosis (age of onset)"
+    ),
+    `P-value annotation` = c("(age of onset)", "(survival)")
+  ),
+  qc_filters = list(
+    min_sample_size = 500,
+    remove_duplicates = TRUE,
+    duplicate_priority = "N",
+    remove_na_cols = c("MAF", "P", "N", "BETA")
+  ),
+  verbose = 2
+)
+
+# Access cleaned data
+als_data <- als_result$data
+```
+
+### Approach 2: Custom Processing Functions
+
+For users who need **maximum control** or have **complex dataset-specific logic**, the package also demonstrates how to write custom processing functions.
+
+**Advantages:**
+- Complete manual control over every step
+- Can implement complex custom logic
+- Good for learning the data preparation process
+- Useful when universal function can't meet specific requirements
+
+**Example:**
+
+The package includes example custom functions in `inst/extdata/get_B_example_data.R`:
+- `prepare_als_example_data()` - Custom ALS processing
+- `prepare_bmd_example_data()` - Custom BMD processing
+
+```{r approach-custom, eval=FALSE}
+library(GLOWr)
+
+# Process ALS data using custom function
+als_result <- prepare_als_example_data()
+
+# Access cleaned data
+als_data <- als_result$data
+```
+
+**Note**: These custom functions do **NOT** use `prepare_B_training_data()` internally. They demonstrate independent implementations with dataset-specific logic.
+
+### Comparison
+
+| Aspect | Custom Processing | Universal Function |
+|--------|-------------------|-------------------|
+| **Functions** | `prepare_als_example_data()`<br>`prepare_bmd_example_data()` | `prepare_B_training_data()` |
+| **Flexibility** | Dataset-specific | General-purpose |
+| **Control** | Full manual control | Parameter-driven |
+| **Code Complexity** | More code, explicit steps | Concise, parameterized |
+| **Adaptability** | Requires rewriting for new data | Easy to adapt with new parameters |
+| **Use Case** | Complex custom logic | Standard GWAS processing |
+| **Output** | Identical processed data | Identical processed data |
+
+### Demonstration: Both Approaches Produce Equivalent Results 
+
+The package includes example scripts demonstrating both approaches:
+
+```{r comparison-demo, eval=FALSE}
+# View the custom approach script
+file.show(system.file("extdata", "prepare_example_data.R", package = "GLOWr"))
+
+# View the universal approach script (recommended)
+file.show(system.file("extdata", "prepare_example_data_universal.R", package = "GLOWr"))
+```
+
+Both scripts process the same raw data files and produce identical outputs with the same SNVs, QC filters, and final datasets.
+
+### Which Approach Should You Use?
+
+**Use the Universal Function (`prepare_B_training_data()`) when:**
+- Processing standard GWAS data formats
+- You want a simple, well-tested approach
+- Your filtering needs can be met with parameters
+- You're new to the package
+
+**Write Custom Functions when:**
+- You need complex, dataset-specific processing logic
+- The universal function can't meet your specific requirements
+- You want to learn the detailed data preparation process
+- You have unique data formats requiring special handling
+
+**Recommendation**: Start with the universal approach (`prepare_B_training_data()`). Only write custom processing functions if you have specific requirements that cannot be met with the flexible parameter system.
+
+---
+
+## Troubleshooting and FAQ
+
+### Problem 1: "Column X not found"
+
+**Cause**: Column name not recognized by automatic detection.
+
+**Solution**:
+
+```{r trouble-column}
+# Option 1: Check what columns you actually have
+df <- readxl::read_excel("your_file.xlsx")
+names(df)
+
+# Option 2: Specify mapping explicitly
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  column_mapping = list(
+    BETA = "Your_Beta_Column_Name",
+    N = "Your_Sample_Size_Column"
+  ),
+  verbose = 2
+)
+```
+
+### Problem 2: "All variants removed during QC"
+
+**Cause**: QC filters too strict or data quality issues.
+
+**Solution**:
+
+```{r trouble-qc}
+# Start with minimal QC to see what you have
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 50,   # Very lenient
+    max_pvalue = 1,
+    min_maf = 0,
+    remove_duplicates = FALSE,
+    remove_na = TRUE
+  ),
+  verbose = 2  # See detailed messages
+)
+
+# Check distributions
+summary(data$data)
+
+# Then gradually increase stringency based on what you see
+```
+
+### Problem 3: "Sample sizes all NA"
+
+**Cause**: Text-based sample sizes not extracted.
+
+**Solution**:
+
+```{r trouble-sample-size}
+# Ensure text extraction is enabled (it is by default)
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "continuous",
+  extract_text_values = TRUE,
+  verbose = 2
+)
+
+# If still failing, inspect the N column manually
+df <- readxl::read_excel("your_file.xlsx")
+head(df$`Sample size`, 20)  # Check format
+
+# You may need to extract manually first
+df$N <- extract_sample_size_from_text(df$`Sample size`)
+
+# Then use the modified data frame
+data <- prepare_B_training_data(
+  data = df,
+  trait_type = "continuous"
+)
+```
+
+### Problem 4: "P-value validation failed"
+
+**Cause**: Invalid P-values in data (P <= 0 or P > 1).
+
+**Solution**:
+
+```{r trouble-pvalue}
+# The function automatically removes invalid P-values
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  verbose = 2  # Will report how many invalid P-values removed
+)
+
+# If you want to inspect first
+df <- readxl::read_excel("your_file.xlsx")
+table(df$P <= 0 | df$P > 1, useNA = "always")
+```
+
+### Problem 5: Multiple columns with similar names
+
+**Cause**: File has both "Beta" (character) and "Beta_numeric" (numeric).
+
+**Solution**:
+
+```{r trouble-multiple}
+# Specify which one to use
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  column_mapping = list(
+    BETA = "Beta_numeric"  # Use the numeric column explicitly
+  ),
+  verbose = 2
+)
+```
+
+### Problem 6: Trait type detection incorrect
+
+**Cause**: Ambiguous data or limited detection signals.
+
+**Solution**:
+
+```{r trouble-trait-type}
+# Option 1: Explicitly specify trait type
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",  # Override auto-detection
+  verbose = 2
+)
+
+# Option 2: Check what was detected
+result <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = NULL,  # Auto-detect
+  verbose = 2
+)
+
+# Examine detected types
+table(result$data$TRAIT_TYPE)
+
+# Manually fix if needed
+result$data$TRAIT_TYPE[result$data$TRAIT_TYPE == "unknown"] <- "binary"
+```
+
+---
+
+## Tips and Best Practices
+
+### Tip 1: Always Use `verbose = 2` Initially
+
+See detailed messages about processing steps:
+
+```{r tip-verbose}
+data <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  verbose = 2  # Shows all processing details
+)
+```
+
+### Tip 2: Check Metadata After Processing
+
+Examine what transformations were applied:
+
+```{r tip-metadata}
+# View all metadata
+names(data$metadata)
+
+# Check conversions
+data$metadata$conversions_applied
+
+# Check QC summary
+data$metadata$qc_summary
+
+# Check filters applied
+data$metadata$filters_applied
+```
+
+### Tip 3: Start Lenient, Then Tighten QC
+
+```{r tip-iterative}
+# First pass: See what you have
+data_all <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 50,
+    max_pvalue = 1,
+    min_maf = 0
+  )
+)
+
+# Check distributions
+summary(data_all$data$N)
+summary(data_all$data$P)
+summary(data_all$data$MAF)
+
+# Second pass: Apply appropriate filters based on inspection
+data_clean <- prepare_B_training_data(
+  data = "your_file.xlsx",
+  trait_type = "binary",
+  qc_filters = list(
+    min_sample_size = 500,    # Decided based on data
+    max_pvalue = 0.05,
+    min_maf = 0.01
+  )
+)
+```
+
+### Tip 4: Save Processed Data
+
+Avoid re-processing every time:
+
+```{r tip-save}
+# Save processed data
+saveRDS(gwas_data, "my_gwas_processed.rds")
+
+# Load later
+gwas_data <- readRDS("my_gwas_processed.rds")
+
+# Use directly with get_B()
+B_estimates <- get_B(
+  training_trait = gwas_data$metadata$trait_type,
+  training_MAF = gwas_data$data$MAF,
+  training_P = gwas_data$data$P,
+  training_N = gwas_data$data$N,
+  target_trait = "binary",
+  target_MAF = seq(0.01, 0.5, by = 0.01)
+)
+```
+
+### Tip 5: Validate Your Data
+
+Check that data meets requirements:
+
+```{r tip-validate}
+# Manual validation check
+validation <- validate_B_training_data(
+  data = gwas_data$data,
+  method = "pvalue",
+  verbose = 2
+)
+
+if (!validation$valid) {
+  print(validation$errors)
+}
+```
+
+---
+
+## Summary
+
+The `prepare_B_training_data()` function provides a comprehensive, intelligent pipeline for processing GWAS summary statistics:
+
+- **Automatic**: Smart column detection, text extraction, conversions
+- **Flexible**: Support for Excel, CSV, TSV, data frames
+- **Robust**: Comprehensive QC and validation
+- **Transparent**: Full metadata tracking
+- **Ready**: Standardized output for `get_B()` estimation
+
+**Key Outputs:**
+
+1. **data**: Clean data frame with standardized columns (rsID, CHR, POS, MAF, P, N, BETA, TRAIT_TYPE, ...)
+2. **metadata**: Complete processing record (conversions, filters, QC summary)
+
+**Next Steps:**
+
+After preparing your data, use `get_B()` for B parameter estimation:
+
+```{r summary-workflow, eval=FALSE}
+# 1. Prepare data
+gwas_data <- prepare_B_training_data(
+  data = "my_gwas.xlsx",
+  trait_type = "binary",
+  verbose = 2
+)
+
+# 2. Estimate B parameters
+B_estimates <- get_B(
+  training_trait = "binary",
+  training_MAF = gwas_data$data$MAF,
+  training_P = gwas_data$data$P,
+  training_N = gwas_data$data$N,
+  target_trait = "binary",
+  target_MAF = seq(0.01, 0.5, by = 0.01)
+)
+
+# 3. Use B estimates in GLOW tests
+# See vignette("estimating_effect_sizes") for details
+```
+
+---
+
+## Getting Help
+
+- **Function documentation**: `?prepare_B_training_data`
+- **Related functions**: `?standardize_column_names`, `?apply_qc_filters`, `?validate_B_training_data`
+- **Package vignettes**: `browseVignettes("GLOWr")`
+- **B estimation vignette**: `vignette("estimating_effect_sizes", package = "GLOWr")`
+
+---
+
+**Date**: `r Sys.Date()`
+**Package**: GLOWr
+**Version**: `r packageVersion("GLOWr")`

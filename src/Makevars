@@ -1,0 +1,16 @@
+## -*- mode: makefile -*-
+##
+## Makevars for GLOWr package
+##
+## This file configures C++ compilation settings for the package.
+##
+## Edit log (2026-06-13, Claude Code / r-developer, prompted by ZWu for the
+## GLOWr release gate): removed `CXX_STD = CXX11` (modern R defaults to C++11 or
+## later, so specifying it triggers an --as-cran "please drop specification"
+## NOTE) and removed the `$(SHLIB_OPENMP_CXXFLAGS)` flag (the C++ sources use no
+## OpenMP -- no `#pragma omp` anywhere -- so it was vestigial and produced an
+## "OPENMP macro in PKG_CXXFLAGS but none in PKG_LIBS" NOTE). No build behaviour
+## changes: the package never used OpenMP.
+
+## Header include path for the package's own headers.
+PKG_CPPFLAGS = -I../inst/include

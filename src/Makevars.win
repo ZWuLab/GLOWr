@@ -1,0 +1,11 @@
+## -*- mode: makefile -*-
+##
+## Makevars.win for GLOWr package (Windows-specific settings)
+##
+## Edit log (2026-06-13, Claude Code / r-developer, prompted by ZWu for the
+## GLOWr release gate): removed `CXX_STD = CXX11` and the vestigial
+## `$(SHLIB_OPENMP_CXXFLAGS)` flag (the C++ sources use no OpenMP), mirroring the
+## change in src/Makevars. No build behaviour changes.
+
+## Header include path for the package's own headers.
+PKG_CPPFLAGS = -I../inst/include
