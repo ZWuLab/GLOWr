@@ -41,10 +41,14 @@ file ensures the function works even if the split file is not present in
 the FAVOR database directory}
 
 \item{features}{Character vector. FAVOR feature column names to extract.
-Default is 11 standard features: apc_conservation, apc_protein_function_v3,
-apc_epigenetics_active, apc_epigenetics_repressed,
-apc_epigenetics_transcription, apc_local_nucleotide_diversity,
-apc_mappability, apc_transcription_factor, cadd_phred, linsight, fathmm_xf}
+The default is the complete annotation content of the FAVOR Essential
+Database (30 columns): 20 numeric scores (17 annotation principal
+components, CADD PHRED, LINSIGHT, FATHMM-XF) plus 10 categorical fields
+(GENCODE category/info and exonic category/info, MetaSVM prediction,
+GeneHancer, CAGE, rDHS, rsID). The categorical fields are what the
+built-in coding masks read, so an aGDS built with the default is directly
+scannable by every built-in variant category. Pass a subset to shrink the
+aGDS; features absent from the FAVOR source are skipped with a warning.}
 
 \item{output_csv}{Character or NULL. If provided, saves annotated results
 to CSV file at this path}

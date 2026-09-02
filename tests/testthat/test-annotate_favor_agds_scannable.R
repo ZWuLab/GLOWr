@@ -282,3 +282,138 @@ test_that("annotate_favor(output_agds=) from a data.frame writes a sub-node fold
   expect_type(gene_cat, "character")
   expect_identical(gene_cat, fb$favor$genecode_comprehensive_category)
 })
+
+
+# ------------------------------------------------------------------------------
+# TEST: an aGDS built with the DEFAULT feature set runs every built-in coding mask
+# ------------------------------------------------------------------------------
+#
+# Regression guard for the 2026-08-21 fix. `annotate_favor()`'s default used to be
+# 20 purely numeric columns, so an aGDS built by the documented default path (the
+# GLOWanalyses template passes favor_features = NULL) carried none of the
+# categorical fields the coding masks read -- every mask died on a missing node.
+
+# Build a one-chunk FAVOR DB carrying EVERY column in the default feature set,
+# with values chosen so each coding mask selects at least one variant.
+.build_full_favor_db <- function(dir, gds_fields, seed = 7L) {
+  set.seed(seed)
+  n <- length(gds_fields$pos)
+  feats <- GLOWr:::.default_favor_features()
+
+  # Cycle the exonic categories the masks key on, so plof/ptv/missense/
+  # disruptive_missense/synonymous each get variants.
+  exonic <- rep(c("stopgain", "stoploss", "frameshift deletion",
+                  "nonsynonymous SNV", "synonymous SNV"), length.out = n)
+  gene_cat <- rep("exonic", n)
+  gene_cat[seq(5, n, by = 10)] <- "splicing"
+  metasvm <- rep(c("D", "T"), length.out = n)
+
+  favor <- data.frame(
+    variant_vcf = paste(gds_fields$chr, gds_fields$pos,
+                        gds_fields$ref, gds_fields$alt, sep = "-"),
+    chromosome  = gds_fields$chr,
+    position    = gds_fields$pos,
+    ref_vcf     = gds_fields$ref,
+    alt_vcf     = gds_fields$alt,
+    stringsAsFactors = FALSE
+  )
+  categorical <- c("genecode_comprehensive_category",
+                   "genecode_comprehensive_exonic_category",
+                   "genecode_comprehensive_info",
+                   "genecode_comprehensive_exonic_info",
+                   "metasvm_pred", "genehancer", "cage_tc", "cage_promoter",
+                   "rdhs", "rsid")
+  for (f in feats) {
+    favor[[f]] <- if (f %in% categorical) {
+      switch(f,
+        genecode_comprehensive_category         = gene_cat,
+        genecode_comprehensive_exonic_category  = exonic,
+        genecode_comprehensive_info             = rep("GENEA", n),
+        genecode_comprehensive_exonic_info      = rep("GENEA(exonic)", n),
+        metasvm_pred                            = metasvm,
+        rsid                                    = paste0("rs", seq_len(n)),
+        rep("", n))
+    } else {
+      round(stats::runif(n, 0, 40), 3)
+    }
+  }
+
+  data.table::fwrite(favor, file.path(dir, "chr22_1.csv"))
+  data.table::fwrite(
+    data.frame(Chr = 22L, File_No = 1L, Start_Pos = 1L, End_Pos = 1e7),
+    file.path(dir, "FAVORdatabase_chrsplit.csv")
+  )
+  list(dir = dir, favor = favor)
+}
+
+test_that("an aGDS built with DEFAULT features runs every built-in coding mask", {
+  skip_if_no_gds_tools()
+
+  gds_path <- tempfile(fileext = ".gds")
+  on.exit(unlink(gds_path), add = TRUE)
+  gf <- .build_tiny_gds(gds_path, n_variants = 20L)
+
+  favor_dir <- tempfile("favordb_"); dir.create(favor_dir)
+  on.exit(unlink(favor_dir, recursive = TRUE), add = TRUE)
+  .build_full_favor_db(favor_dir, gf)
+
+  out_agds <- tempfile(fileext = ".gds")
+  on.exit(unlink(out_agds), add = TRUE)
+
+  # NOTE: features= is deliberately NOT passed -- this is the documented default
+  # path that the GLOWanalyses template takes when favor_features is NULL.
+  annotate_favor(variants = gds_path, favor_db_path = favor_dir,
+                 output_agds = out_agds, match_method = "exact", verbose = 0)
+
+  g <- SeqArray::seqOpen(out_agds)
+  fa_sub <- gdsfmt::ls.gdsn(
+    gdsfmt::index.gdsn(g, "annotation/info/FunctionalAnnotation"))
+  SeqArray::seqClose(g)
+
+  # Every default feature is present as its own sub-node...
+  expect_true(all(GLOWr:::.default_favor_features() %in% fa_sub))
+  # ...including the categorical ones, which the old default omitted.
+  expect_true("genecode_comprehensive_exonic_category" %in% fa_sub)
+  expect_true("metasvm_pred" %in% fa_sub)
+
+  # ...and every built-in coding mask resolves against it without error.
+  region <- list(chr = "22", start = min(gf$pos), end = max(gf$pos),
+                 label = "TINY")
+  for (cat in c("plof", "plof_ds", "missense", "disruptive_missense",
+                "synonymous", "ptv", "ptv_ds")) {
+    spec <- coding_filter(cat, rare_maf_cutoff = 0.5, min_mac = 0L,
+                          min_variants = 1L)
+    expect_error(
+      extract_variant_set(out_agds, region, spec, verbose = 0),
+      NA, info = cat
+    )
+  }
+})
+
+test_that("string annotations survive flexible matching (type-aware aggregation)", {
+  skip_if_no_gds_tools()
+
+  gds_path <- tempfile(fileext = ".gds")
+  on.exit(unlink(gds_path), add = TRUE)
+  gf <- .build_tiny_gds(gds_path, n_variants = 10L)
+
+  favor_dir <- tempfile("favordb_"); dir.create(favor_dir)
+  on.exit(unlink(favor_dir, recursive = TRUE), add = TRUE)
+  fb <- .build_full_favor_db(favor_dir, gf)
+
+  out_agds <- tempfile(fileext = ".gds")
+  on.exit(unlink(out_agds), add = TRUE)
+  annotate_favor(variants = gds_path, favor_db_path = favor_dir,
+                 output_agds = out_agds, match_method = "flexible", verbose = 0)
+
+  g <- SeqArray::seqOpen(out_agds)
+  on.exit(SeqArray::seqClose(g), add = TRUE)
+  cat_vals <- SeqArray::seqGetData(
+    g, "annotation/info/FunctionalAnnotation/genecode_comprehensive_exonic_category")
+
+  # Under the old mean(as.numeric(x)) aggregation these came back all-NA.
+  expect_type(cat_vals, "character")
+  expect_true(any(nzchar(cat_vals)))
+  expect_equal(as.character(cat_vals),
+               fb$favor$genecode_comprehensive_exonic_category)
+})

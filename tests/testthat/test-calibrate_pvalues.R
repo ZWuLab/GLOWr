@@ -77,6 +77,47 @@ test_that("ldsc_intercept requires an explicit calibration_factor", {
 })
 
 
+# ---- inflation_only: one-sided (METAL-style) clamping ------------------------
+
+test_that("inflation_only = TRUE leaves a deflated column uncorrected (factor clamped to 1)", {
+  set.seed(12)
+  chi2 <- stats::rchisq(20000, df = 1) * 0.7               # deflated null
+  p <- stats::pchisq(chi2, df = 1, lower.tail = FALSE)
+  res_default <- calibrate_pvalues(p, method = "lambda_gc")
+  res_clamped <- calibrate_pvalues(p, method = "lambda_gc", inflation_only = TRUE)
+  # Default (two-sided) up-scales the deflated column toward lambda = 1 ...
+  expect_true(res_default$calibration_factor < 1)
+  expect_equal(compute_lambda_gc(res_default$p), 1, tolerance = 0.05)
+  # ... the one-sided convention leaves it alone: factor 1, p unchanged.
+  expect_identical(res_clamped$calibration_factor, 1)
+  expect_equal(res_clamped$p, p, tolerance = 1e-12)
+})
+
+test_that("inflation_only = TRUE does not change the correction of an inflated column", {
+  set.seed(13)
+  chi2 <- stats::rchisq(20000, df = 1) * 1.3
+  p <- stats::pchisq(chi2, df = 1, lower.tail = FALSE)
+  expect_equal(calibrate_pvalues(p, method = "lambda_gc", inflation_only = TRUE),
+               calibrate_pvalues(p, method = "lambda_gc"))
+})
+
+test_that("inflation_only clamps a supplied sub-1 factor; degenerate pass-through unaffected", {
+  p <- c(0.5, 0.1, 1e-4)
+  res <- calibrate_pvalues(p, method = "ldsc_intercept",
+                           calibration_factor = 0.9, inflation_only = TRUE)
+  expect_identical(res$calibration_factor, 1)
+  expect_equal(res$p, p, tolerance = 1e-12)
+  # A degenerate factor (NA / non-positive) still passes p through unchanged,
+  # checked before any clamping.
+  expect_identical(
+    calibrate_pvalues(p, method = "ldsc_intercept", calibration_factor = NA_real_,
+                      inflation_only = TRUE)$p, p)
+  expect_identical(
+    calibrate_pvalues(p, method = "ldsc_intercept", calibration_factor = 0,
+                      inflation_only = TRUE)$p, p)
+})
+
+
 # ---- pass-through contract (NA / degenerate factor) --------------------------
 
 test_that("NA and out-of-(0,1] entries flow through as NA; p = 0 maps to 0", {

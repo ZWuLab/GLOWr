@@ -52,15 +52,32 @@
 #' \code{compute_lambda_gc} returns \code{NA}). \code{NA} / out-of-\eqn{(0,1]}
 #' entries flow through as \code{NA}.
 #'
+#' \strong{One-sided (inflation-only) convention.} Genomic-control correction is
+#' conventionally one-sided: a factor \eqn{f > 1} (inflation) is corrected, while
+#' \eqn{f < 1} (deflation) is read as the test's own conservativeness and left
+#' alone -- dividing by \eqn{f < 1} would scale every statistic \emph{up} and can
+#' manufacture significance. The METAL meta-analysis software has enforced this
+#' since 2008: "a genomic control correction is only applied to studies where the
+#' genomic control parameter lambda > 1.0" (METAL ChangeLog, 2008-07-01, where
+#' correcting deflated studies is recorded as a fixed bug; Willer et al. 2010).
+#' Set \code{inflation_only = TRUE} to reproduce that convention. The default
+#' \code{FALSE} keeps the two-sided rescaling, which applies the factor in both
+#' directions and is useful as a diagnostic of what a naive correction would do.
+#'
 #' @param p Numeric vector of p-values.
 #' @param method Calibration method -- the source of the factor:
 #'   \code{"lambda_gc"} (default) or \code{"ldsc_intercept"}.
 #' @param calibration_factor Optional numeric scalar, the chi-square divisor
 #'   \eqn{f}. For \code{"lambda_gc"} it defaults to \code{compute_lambda_gc(p)};
 #'   for \code{"ldsc_intercept"} it is required (the supplied LDSC intercept).
+#' @param inflation_only Logical. If \code{TRUE}, a (valid) calibration factor
+#'   below 1 is replaced by 1, so deflated p-values are left uncorrected --
+#'   the field-standard one-sided genomic-control convention (see Details).
+#'   Default \code{FALSE}: the factor is applied as is, in both directions.
 #'
 #' @return A list with components \code{p} (the calibrated vector, same length
-#'   and order as the input), \code{calibration_factor} (the factor used), and
+#'   and order as the input), \code{calibration_factor} (the factor actually
+#'   applied; \code{1} when \code{inflation_only} clamped a sub-1 factor), and
 #'   \code{method}.
 #'
 #' @seealso \code{\link{compute_lambda_gc}}, \code{\link{ldsc_regression}}
@@ -68,6 +85,11 @@
 #' @references
 #' Bulik-Sullivan B. et al. (2015). LD Score regression distinguishes
 #' confounding from polygenicity in GWAS. \emph{Nat Genet} 47:291.
+#'
+#' Willer C.J., Li Y., Abecasis G.R. (2010). METAL: fast and efficient
+#' meta-analysis of genomewide association scans. \emph{Bioinformatics}
+#' 26(17):2190-2191. (One-sided convention: its ChangeLog of 2008-07-01,
+#' \url{https://github.com/statgen/METAL/blob/master/ChangeLog}.)
 #'
 #' @examples
 #' set.seed(1)
@@ -82,7 +104,8 @@
 #' @export
 calibrate_pvalues <- function(p,
                               method = c("lambda_gc", "ldsc_intercept"),
-                              calibration_factor = NULL) {
+                              calibration_factor = NULL,
+                              inflation_only = FALSE) {
   method <- match.arg(method)
 
   if (is.null(calibration_factor)) {
@@ -101,6 +124,13 @@ calibrate_pvalues <- function(p,
   if (length(calibration_factor) != 1L || is.na(calibration_factor) ||
       calibration_factor <= 0) {
     return(list(p = p, calibration_factor = calibration_factor, method = method))
+  }
+
+  # One-sided convention (following METAL, ChangeLog 2008-07-01): correct
+  # inflation only; a factor < 1 (deflation) is clamped to 1, leaving the
+  # deflated p-values uncorrected rather than scaling them up.
+  if (inflation_only && calibration_factor < 1) {
+    calibration_factor <- 1
   }
 
   ok <- is.finite(p) & p >= 0 & p <= 1

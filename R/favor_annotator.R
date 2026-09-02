@@ -41,10 +41,14 @@
 #'   file ensures the function works even if the split file is not present in
 #'   the FAVOR database directory
 #' @param features Character vector. FAVOR feature column names to extract.
-#'   Default is 11 standard features: apc_conservation, apc_protein_function_v3,
-#'   apc_epigenetics_active, apc_epigenetics_repressed,
-#'   apc_epigenetics_transcription, apc_local_nucleotide_diversity,
-#'   apc_mappability, apc_transcription_factor, cadd_phred, linsight, fathmm_xf
+#'   The default is the complete annotation content of the FAVOR Essential
+#'   Database (30 columns): 20 numeric scores (17 annotation principal
+#'   components, CADD PHRED, LINSIGHT, FATHMM-XF) plus 10 categorical fields
+#'   (GENCODE category/info and exonic category/info, MetaSVM prediction,
+#'   GeneHancer, CAGE, rDHS, rsID). The categorical fields are what the
+#'   built-in coding masks read, so an aGDS built with the default is directly
+#'   scannable by every built-in variant category. Pass a subset to shrink the
+#'   aGDS; features absent from the FAVOR source are skipped with a warning.
 #' @param output_csv Character or NULL. If provided, saves annotated results
 #'   to CSV file at this path
 #' @param output_agds Character or NULL. If provided, saves annotated results
@@ -445,7 +449,7 @@ annotate_favor <- function(
             call. = FALSE)
     # Add NA columns for requested features
     for (feat in features) {
-      variant_data[[feat]] <- NA_real_
+      variant_data[[feat]] <- NA
     }
     return(variant_data)
   }
@@ -785,6 +789,23 @@ annotate_favor <- function(
     info_folder <- gdsfmt::index.gdsn(annot_folder, "info")
   }
 
+  # Align the annotation rows to the GDS variant order before writing. The
+  # in-place update writes columns verbatim, so a row-order mismatch (or a
+  # shortened table from na_handling = "drop") would silently attach each
+  # variant its neighbour's annotations. This mirrors the match() that
+  # .create_agds_from_gds() applies, keeping the two writers consistent: the
+  # VarInfo key is chr-pos-ref-firstALT built from the GDS coordinate nodes.
+  if ("VarInfo" %in% names(annotations)) {
+    chrom <- gdsfmt::read.gdsn(gdsfmt::index.gdsn(gds, "chromosome"))
+    pos   <- gdsfmt::read.gdsn(gdsfmt::index.gdsn(gds, "position"))
+    alle  <- gdsfmt::read.gdsn(gdsfmt::index.gdsn(gds, "allele"))
+    ref       <- sub(",.*$", "", alle)
+    alt_first <- sub(",.*$", "", sub("^[^,]*,", "", alle))
+    key <- paste(chrom, pos, ref, alt_first, sep = "-")
+    annot_idx <- match(key, annotations$VarInfo)
+    annotations <- annotations[annot_idx, , drop = FALSE]
+  }
+
   # Write FunctionalAnnotation as a STAARpipeline-style sub-node folder (one
   # typed sub-node per feature). The shared helper handles overwrite-with-warning
   # of any pre-existing node and preserves each feature's native type.
@@ -974,7 +995,22 @@ annotate_favor <- function(
     # 3 Integrative Scores
     "cadd_phred",
     "linsight",
-    "fathmm_xf"
+    "fathmm_xf",
+    # 10 categorical / string fields of the FAVOR Essential DB. Read by the
+    # built-in coding masks (GENCODE category + exonic category, MetaSVM), by
+    # the gene-centric noncoding masks (GENCODE info, CAGE, rDHS, GeneHancer)
+    # and for variant identification (rsid). Written as native character
+    # sub-nodes; never averaged.
+    "genecode_comprehensive_category",
+    "genecode_comprehensive_exonic_category",
+    "genecode_comprehensive_info",
+    "genecode_comprehensive_exonic_info",
+    "metasvm_pred",
+    "genehancer",
+    "cage_tc",
+    "cage_promoter",
+    "rdhs",
+    "rsid"
   )
 }
 
@@ -1161,9 +1197,11 @@ annotate_favor <- function(
   # to silently fail (modified copy not written back to the table).
   result <- as.data.frame(variant_data)
 
-  # Add annotation columns (initially NA)
+  # Add annotation columns (initially NA; the column takes the type of the first
+  # matched value, so numeric scores stay numeric and categorical fields stay
+  # character -- both are first-class FAVOR features).
   for (feat in features) {
-    result[[feat]] <- NA_real_
+    result[[feat]] <- NA
   }
 
   # Separate variants with complete VarInfo vs NA alleles
@@ -1184,11 +1222,12 @@ annotate_favor <- function(
     chunk_path <- file.path(favor_db_path, chunk_file)
 
     if (!file.exists(chunk_path)) {
-      if (verbose >= 1) {
-        warning(sprintf("Chunk file not found, skipping: %s", chunk_file),
-                call. = FALSE)
-      }
-      next
+      # Fatal: proceeding would silently leave every variant in this chunk's
+      # position range unannotated (the same data-loss class as the 2026-09-01
+      # multi-chunk join bug).
+      stop(sprintf(paste0("FAVOR chunk file not found: %s (under %s). ",
+                          "All chunks covering the requested variants must be ",
+                          "present."), chunk_file, favor_db_path), call. = FALSE)
     }
 
     if (verbose >= 2) {
@@ -1394,7 +1433,7 @@ annotate_favor <- function(
       # No match - create row with NAs
       result_row <- data.frame(VarInfo = varinfo, stringsAsFactors = FALSE)
       for (feat in features) {
-        result_row[[feat]] <- NA_real_
+        result_row[[feat]] <- NA
       }
       result_list[[i]] <- result_row
       next
@@ -1409,7 +1448,7 @@ annotate_favor <- function(
         if (feat %in% names(matched_rows)) {
           result_row[[feat]] <- matched_rows[[feat]][1]
         } else {
-          result_row[[feat]] <- NA_real_
+          result_row[[feat]] <- NA
         }
       }
     } else {
@@ -1426,7 +1465,7 @@ annotate_favor <- function(
               result_row[[feat]] <- values[1]
             }
           } else {
-            result_row[[feat]] <- NA_real_
+            result_row[[feat]] <- NA
           }
         }
       } else {
@@ -1435,7 +1474,7 @@ annotate_favor <- function(
           if (feat %in% names(matched_rows)) {
             result_row[[feat]] <- matched_rows[[feat]][1]
           } else {
-            result_row[[feat]] <- NA_real_
+            result_row[[feat]] <- NA
           }
         }
       }
@@ -1526,9 +1565,9 @@ annotate_favor <- function(
   favor_data$ref <- favor_data$ref_vcf
   favor_data$alt <- favor_data$alt_vcf
 
-  # Initialize result
+  # Initialize result (NA, typed by the first matched value -- see .join_favor_r)
   result <- data.frame(VarInfo = variants$VarInfo, stringsAsFactors = FALSE)
-  for (feat in features) result[[feat]] <- NA_real_
+  for (feat in features) result[[feat]] <- NA
 
   matched_mask <- rep(FALSE, nrow(variants))
   n_same_ref <- 0
@@ -1547,9 +1586,7 @@ annotate_favor <- function(
     )
     if (nrow(merged) > 0) {
       # Aggregate multiple matches by averaging
-      agg <- aggregate(merged[, features, drop = FALSE],
-                       by = list(VarInfo = merged$VarInfo),
-                       FUN = function(x) mean(as.numeric(x), na.rm = TRUE))
+      agg <- .aggregate_feature_matches(merged, features)
       # Update result
       for (i in seq_len(nrow(agg))) {
         idx <- which(result$VarInfo == agg$VarInfo[i])
@@ -1574,9 +1611,7 @@ annotate_favor <- function(
       all.x = FALSE
     )
     if (nrow(merged) > 0) {
-      agg <- aggregate(merged[, features, drop = FALSE],
-                       by = list(VarInfo = merged$VarInfo),
-                       FUN = function(x) mean(as.numeric(x), na.rm = TRUE))
+      agg <- .aggregate_feature_matches(merged, features)
       for (i in seq_len(nrow(agg))) {
         idx <- which(result$VarInfo == agg$VarInfo[i])
         if (length(idx) == 1 && !matched_mask[idx]) {
@@ -1598,9 +1633,7 @@ annotate_favor <- function(
       all.x = FALSE
     )
     if (nrow(merged) > 0) {
-      agg <- aggregate(merged[, features, drop = FALSE],
-                       by = list(VarInfo = merged$VarInfo),
-                       FUN = function(x) mean(as.numeric(x), na.rm = TRUE))
+      agg <- .aggregate_feature_matches(merged, features)
       for (i in seq_len(nrow(agg))) {
         idx <- which(result$VarInfo == agg$VarInfo[i])
         if (length(idx) == 1 && !matched_mask[idx]) {
@@ -1621,6 +1654,43 @@ annotate_favor <- function(
   }
 
   return(result[, c("VarInfo", features), drop = FALSE])
+}
+
+
+#' Aggregate Multiple FAVOR Matches per Variant (type-aware)
+#'
+#' @description
+#' In the flexible-matching tiers one variant can match several FAVOR rows
+#' (multiallelic sites, position-level fallback). Numeric features are
+#' averaged over non-missing values; character features (GENCODE category,
+#' GeneHancer, ...) take the first non-empty value, because averaging a
+#' category is meaningless and the previous mean(as.numeric(x)) silently
+#' produced NA for every string feature.
+#'
+#' @param merged data.frame with a VarInfo column and the feature columns,
+#'   possibly several rows per VarInfo.
+#' @param features Character vector of feature column names.
+#' @return data.frame with one row per VarInfo and one column per feature.
+#' @keywords internal
+#' @noRd
+.aggregate_feature_matches <- function(merged, features) {
+  groups <- split(seq_len(nrow(merged)), merged$VarInfo)
+  out <- data.frame(VarInfo = names(groups), stringsAsFactors = FALSE)
+  for (feat in features) {
+    col <- merged[[feat]]
+    if (is.numeric(col) || is.logical(col)) {
+      out[[feat]] <- vapply(groups, function(ix) {
+        v <- col[ix]; v <- v[!is.na(v)]
+        if (length(v)) mean(as.numeric(v)) else NA_real_
+      }, numeric(1), USE.NAMES = FALSE)
+    } else {
+      out[[feat]] <- vapply(groups, function(ix) {
+        v <- as.character(col[ix]); v <- v[!is.na(v) & nzchar(v)]
+        if (length(v)) v[1] else NA_character_
+      }, character(1), USE.NAMES = FALSE)
+    }
+  }
+  out
 }
 
 
@@ -1663,9 +1733,16 @@ annotate_favor <- function(
     }
 
   } else if (na_handling == "zero") {
-    # Replace NA with 0
+    # Replace NA with 0 -- numeric features only. Character features (e.g. the
+    # GENCODE category) keep NA: a "0" string would be a fabricated category.
     for (feat in features) {
       if (feat %in% names(data)) {
+        if (!(is.numeric(data[[feat]]) || is.logical(data[[feat]]))) {
+          if (verbose >= 2) {
+            message(sprintf("    Keeping NA in non-numeric feature %s (na_handling='zero' applies to numeric features)", feat))
+          }
+          next
+        }
         na_idx <- is.na(data[[feat]])
         n_na <- sum(na_idx)
         if (n_na > 0) {
@@ -1737,10 +1814,13 @@ annotate_favor <- function(
 #'
 #' \enumerate{
 #'   \item Write input variants to temporary CSV (VarInfo column only)
-#'   \item For each FAVOR chunk: \code{xsv join --left VarInfo input.csv variant_vcf chunk.csv}
+#'   \item For each FAVOR chunk: \code{xsv join VarInfo input.csv variant_vcf chunk.csv}
+#'     (an INNER join; each chunk output holds only that chunk's matches, and
+#'     every xsv exit status is checked -- a failed join is fatal)
 #'   \item Concatenate chunk results: \code{xsv cat rows}
 #'   \item Select needed columns: \code{xsv select}
-#'   \item Read result back into R
+#'   \item Read back into R; \code{merge(all.x = TRUE)} restores unmatched
+#'     variants as NA, and the result is reordered to the input variant order
 #' }
 #'
 #' \strong{Performance Notes:}
@@ -1786,10 +1866,12 @@ annotate_favor <- function(
     chunk_path <- file.path(favor_db_path, chunk_file)
 
     if (!file.exists(chunk_path)) {
-      if (verbose >= 1) {
-        warning(sprintf("Chunk file not found, skipping: %s", chunk_file), call. = FALSE)
-      }
-      next
+      # Fatal: skipping would silently leave every variant in this chunk's
+      # position range unannotated (the same data-loss class as the 2026-09-01
+      # multi-chunk join bug).
+      stop(sprintf(paste0("FAVOR chunk file not found: %s (under %s). ",
+                          "All chunks covering the requested variants must be ",
+                          "present."), chunk_file, favor_db_path), call. = FALSE)
     }
 
     if (verbose >= 2) {
@@ -1799,26 +1881,34 @@ annotate_favor <- function(
 
     # Output file for this chunk
     chunk_output <- file.path(temp_dir, sprintf("joined_%d.csv", i))
+    chunk_stderr <- file.path(temp_dir, sprintf("joined_%d.stderr", i))
 
-    # Direct join: xsv join --left VarInfo input.csv variant_vcf chunk.csv
-    result <- tryCatch({
-      system2(
-        "xsv",
-        args = c("join", "--left", "VarInfo", input_csv, "variant_vcf", chunk_path),
-        stdout = chunk_output,
-        stderr = FALSE
-      )
-      0L  # Success
-    }, error = function(e) {
-      if (verbose >= 2) {
-        message(sprintf("      Error: %s", e$message))
-      }
-      1L  # Failure
-    })
-
-    if (result == 0 && file.exists(chunk_output) && file.size(chunk_output) > 0) {
-      chunk_results <- c(chunk_results, chunk_output)
+    # INNER join per chunk: xsv join VarInfo input.csv variant_vcf chunk.csv.
+    # Each chunk output holds only that chunk's matches; the final
+    # merge(all.x = TRUE) restores unmatched variants as NA. The join must NOT
+    # be --left here: a left join emits EVERY input row per chunk, so after
+    # concatenation the keep-first dedup kept chunk 1's empty row and silently
+    # discarded every later chunk's real match (found 2026-09-01 on 1000G
+    # chr22: only chunk 1's range annotated, 35% overall coverage).
+    status <- tryCatch(
+      system2("xsv",
+              args = c("join", "VarInfo", input_csv, "variant_vcf", chunk_path),
+              stdout = chunk_output, stderr = chunk_stderr),
+      error = function(e) e$message)
+    if (!identical(status, 0L)) {
+      err_txt <- if (is.character(status)) status
+                 else if (file.exists(chunk_stderr))
+                   paste(readLines(chunk_stderr, warn = FALSE), collapse = " ")
+                 else ""
+      # A failed chunk join must be fatal: proceeding would silently drop this
+      # chunk's annotations (system2's exit status was previously ignored).
+      stop(sprintf(paste0("xsv join failed on FAVOR chunk %s (status %s)%s. ",
+                          "Rerun with more memory or use_xsv = FALSE."),
+                   chunk_file, paste(status, collapse = ","),
+                   if (nzchar(err_txt)) paste0(": ", err_txt) else ""),
+           call. = FALSE)
     }
+    chunk_results <- c(chunk_results, chunk_output)
   }
 
   if (length(chunk_results) == 0) {
@@ -1827,7 +1917,7 @@ annotate_favor <- function(
     }
     # Return input with NA annotations
     for (feat in features) {
-      variant_data[[feat]] <- NA_real_
+      variant_data[[feat]] <- NA
     }
     return(variant_data)
   }
@@ -1839,17 +1929,16 @@ annotate_favor <- function(
     combined_csv <- file.path(temp_dir, "combined.csv")
 
     # xsv cat rows file1.csv file2.csv ... > combined.csv
-    # Use system2() for better cross-platform compatibility
-    tryCatch({
-      system2(
-        "xsv",
-        args = c("cat", "rows", chunk_results),
-        stdout = combined_csv,
-        stderr = FALSE
-      )
-    }, error = function(e) {
-      warning("xsv cat rows failed: ", e$message, call. = FALSE)
-    })
+    # Exit status checked: a partial concatenation would silently truncate the
+    # annotation set (the pre-2026-09-01 code ignored it).
+    status <- tryCatch(
+      system2("xsv", args = c("cat", "rows", chunk_results),
+              stdout = combined_csv, stderr = FALSE),
+      error = function(e) e$message)
+    if (!identical(status, 0L)) {
+      stop("xsv cat rows failed (status ", paste(status, collapse = ","),
+           "); aborting rather than losing chunk annotations.", call. = FALSE)
+    }
   }
 
   # Step 4: Select only needed columns
@@ -1870,25 +1959,23 @@ annotate_favor <- function(
       warning("xsv: No requested feature columns found in FAVOR data", call. = FALSE)
     }
     for (feat in features) {
-      variant_data[[feat]] <- NA_real_
+      variant_data[[feat]] <- NA
     }
     return(variant_data)
   }
 
-  # Select columns
+  # Select columns (exit status checked, as above)
   selected_csv <- file.path(temp_dir, "selected.csv")
 
-  # Use system2() for better cross-platform compatibility
-  tryCatch({
-    system2(
-      "xsv",
-      args = c("select", paste(cols_present, collapse = ","), combined_csv),
-      stdout = selected_csv,
-      stderr = FALSE
-    )
-  }, error = function(e) {
-    warning("xsv select failed: ", e$message, call. = FALSE)
-  })
+  status <- tryCatch(
+    system2("xsv",
+            args = c("select", paste(cols_present, collapse = ","), combined_csv),
+            stdout = selected_csv, stderr = FALSE),
+    error = function(e) e$message)
+  if (!identical(status, 0L)) {
+    stop("xsv select failed (status ", paste(status, collapse = ","), ").",
+         call. = FALSE)
+  }
 
   # Step 5: Read result back into R
   if (verbose >= 2) {
@@ -1911,15 +1998,29 @@ annotate_favor <- function(
     sort = FALSE
   )
 
-  # Add any missing feature columns as NA
+  # Add any missing feature columns as NA (untyped: a missing column may be
+  # numeric or categorical; NA lets a later assignment set the type).
   for (feat in features) {
     if (!feat %in% names(result)) {
-      result[[feat]] <- NA_real_
+      result[[feat]] <- NA
     }
   }
 
-  if (verbose >= 1) {
-    n_annotated <- sum(!is.na(result[[features[1]]]))
+  # Restore the input row order: merge(sort = FALSE) returns matched rows first
+  # and unmatched rows appended, which breaks the documented order-preserving
+  # contract (and would misalign an in-place GDS update). The R join path
+  # preserves order by construction; this makes the two paths agree.
+  result <- result[match(variant_data$VarInfo, result$VarInfo), , drop = FALSE]
+  rownames(result) <- NULL
+
+  if (verbose >= 1 && nrow(result) > 0) {
+    # A variant counts as annotated when ANY requested feature is non-NA
+    # (features differ in coverage; e.g. aPC scores are SNV-only while CADD
+    # also covers indels).
+    present <- features[features %in% names(result)]
+    any_annot <- Reduce(`|`, lapply(present, function(f) !is.na(result[[f]])),
+                        accumulate = FALSE)
+    n_annotated <- if (is.null(any_annot)) 0L else sum(any_annot)
     message(sprintf("  xsv: Annotated %d/%d variants (%.1f%%)",
                     n_annotated, nrow(result), 100 * n_annotated / nrow(result)))
   }

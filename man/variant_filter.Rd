@@ -24,8 +24,14 @@ Default "annotation/filter".}
 Default "SNV".}
 
 \item{annotation_clauses}{List of clauses in DNF form. Each clause is a
-named list of field = accepted_values conditions (AND-ed within clause).
-Clauses are OR-ed together. NULL means no annotation filtering.}
+named list of \code{field = condition} terms (AND-ed within a clause);
+clauses are OR-ed together. A condition is either an atomic vector of
+accepted values (set membership, e.g. \code{"GENCODE.Category" =
+  c("UTR3", "UTR5")}) or a predicate built with
+\code{\link{annotation_predicate}} for tests membership cannot express:
+non-empty / empty fields (\code{annotation_predicate("nonempty")}) and
+numeric comparisons (\code{annotation_predicate("gt", 20)}). NULL means
+no annotation filtering.}
 
 \item{rare_maf_cutoff}{Numeric MAF ceiling. Variants with MAF > this
 are excluded. Default 0.01.}
@@ -66,5 +72,16 @@ spec_custom <- variant_filter(
 
 # All rare variants (SNV + Indel), no annotation filter
 spec_all <- variant_filter(variant_type = "variant", rare_maf_cutoff = 0.05)
+
+# Predicates beyond set membership: nonsynonymous SNVs with CADD PHRED > 20,
+# OR any variant inside a GeneHancer element (non-empty field)
+spec_pred <- variant_filter(
+  annotation_clauses = list(
+    list("GENCODE.EXONIC.Category" = "nonsynonymous SNV",
+         "CADD" = annotation_predicate("gt", 20)),
+    list("GeneHancer" = annotation_predicate("nonempty"))
+  ),
+  rare_maf_cutoff = 0.5
+)
 
 }

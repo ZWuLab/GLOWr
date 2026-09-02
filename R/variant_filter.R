@@ -28,8 +28,14 @@
 #' @param variant_type Character: "SNV", "Indel", or "variant" (both).
 #'   Default "SNV".
 #' @param annotation_clauses List of clauses in DNF form. Each clause is a
-#'   named list of field = accepted_values conditions (AND-ed within clause).
-#'   Clauses are OR-ed together. NULL means no annotation filtering.
+#'   named list of \code{field = condition} terms (AND-ed within a clause);
+#'   clauses are OR-ed together. A condition is either an atomic vector of
+#'   accepted values (set membership, e.g. \code{"GENCODE.Category" =
+#'   c("UTR3", "UTR5")}) or a predicate built with
+#'   \code{\link{annotation_predicate}} for tests membership cannot express:
+#'   non-empty / empty fields (\code{annotation_predicate("nonempty")}) and
+#'   numeric comparisons (\code{annotation_predicate("gt", 20)}). NULL means
+#'   no annotation filtering.
 #' @param rare_maf_cutoff Numeric MAF ceiling. Variants with MAF > this
 #'   are excluded. Default 0.01.
 #' @param min_mac Integer minimum cohort minor allele count. Variants with
@@ -62,6 +68,17 @@
 #' # All rare variants (SNV + Indel), no annotation filter
 #' spec_all <- variant_filter(variant_type = "variant", rare_maf_cutoff = 0.05)
 #'
+#' # Predicates beyond set membership: nonsynonymous SNVs with CADD PHRED > 20,
+#' # OR any variant inside a GeneHancer element (non-empty field)
+#' spec_pred <- variant_filter(
+#'   annotation_clauses = list(
+#'     list("GENCODE.EXONIC.Category" = "nonsynonymous SNV",
+#'          "CADD" = annotation_predicate("gt", 20)),
+#'     list("GeneHancer" = annotation_predicate("nonempty"))
+#'   ),
+#'   rare_maf_cutoff = 0.5
+#' )
+#'
 #' @export
 variant_filter <- function(qc_label = "annotation/filter",
                             qc_pass_value = "PASS",
@@ -80,6 +97,9 @@ variant_filter <- function(qc_label = "annotation/filter",
       clause <- annotation_clauses[[i]]
       stopifnot(is.list(clause), length(clause) > 0)
       stopifnot(all(nchar(names(clause)) > 0))
+      for (field in names(clause)) {
+        .validate_clause_condition(clause[[field]], field, i)
+      }
     }
   }
 
@@ -181,7 +201,89 @@ print.glow_variant_filter <- function(x, ...) {
 }
 
 
+#' Build an Annotation Predicate for Variant Filtering
+#'
+#' Expresses a per-variant condition on an annotation field that set
+#' membership cannot: non-empty / empty fields and numeric comparisons. Use
+#' the result as a condition value inside the \code{annotation_clauses} of
+#' \code{\link{variant_filter}}.
+#'
+#' @param op Character operator: \code{"nonempty"} (not NA and not the empty
+#'   string), \code{"empty"} (NA or the empty string), \code{"in"} /
+#'   \code{"not_in"} (set membership), or a numeric comparison \code{"gt"},
+#'   \code{"ge"}, \code{"lt"}, \code{"le"} (greater / less than, or equal).
+#' @param value Comparison value: a single non-missing number for the numeric
+#'   operators; a non-empty atomic vector for \code{"in"} / \code{"not_in"};
+#'   must be NULL for \code{"nonempty"} / \code{"empty"}.
+#'
+#' @details
+#' Missing values never satisfy a positive test: \code{NA} is \code{FALSE}
+#' under \code{"gt"}, \code{"ge"}, \code{"lt"}, \code{"le"} and \code{"in"},
+#' and \code{TRUE} under \code{"empty"} and \code{"not_in"}. For the numeric
+#' operators, character-stored numbers are coerced with \code{as.numeric()};
+#' values that do not parse count as missing.
+#'
+#' @return A \code{glow_annotation_predicate} S3 object.
+#'
+#' @examples
+#' annotation_predicate("nonempty")
+#' annotation_predicate("gt", 20)
+#' annotation_predicate("in", c("D", "T"))
+#'
+#' @seealso \code{\link{variant_filter}}
+#' @export
+annotation_predicate <- function(op, value = NULL) {
+  ops <- c("in", "not_in", "nonempty", "empty", "gt", "ge", "lt", "le")
+  if (!is.character(op) || length(op) != 1L || !op %in% ops) {
+    stop("annotation_predicate(): op must be one of ", paste(ops, collapse = ", "))
+  }
+  if (op %in% c("nonempty", "empty")) {
+    if (!is.null(value)) stop("annotation_predicate(): op '", op, "' takes no value")
+  } else if (op %in% c("gt", "ge", "lt", "le")) {
+    if (!is.numeric(value) || length(value) != 1L || is.na(value)) {
+      stop("annotation_predicate(): op '", op, "' needs a single non-missing numeric value")
+    }
+  } else {
+    if (is.null(value) || !is.atomic(value) || length(value) == 0L) {
+      stop("annotation_predicate(): op '", op, "' needs a non-empty atomic vector of values")
+    }
+  }
+  structure(list(op = op, value = value), class = "glow_annotation_predicate")
+}
+
+
+#' Print Method for Annotation Predicates
+#'
+#' @param x A \code{glow_annotation_predicate} object.
+#' @param ... Additional arguments (ignored).
+#'
+#' @return Invisibly returns \code{x}.
+#' @export
+print.glow_annotation_predicate <- function(x, ...) {
+  val <- if (is.null(x$value)) "" else paste(format(x$value), collapse = ", ")
+  cat("GLOWr annotation predicate:", x$op, val, "\n")
+  invisible(x)
+}
+
+
 #################### INTERNAL HELPER FUNCTIONS ####################
+
+#' Is this object an annotation predicate?
+#' @keywords internal
+#' @noRd
+.is_annotation_predicate <- function(x) inherits(x, "glow_annotation_predicate")
+
+
+#' Validate one clause condition (atomic accepted-values vector or predicate)
+#' @keywords internal
+#' @noRd
+.validate_clause_condition <- function(cond, field, clause_index) {
+  if (.is_annotation_predicate(cond)) return(invisible(TRUE))
+  if (!is.null(cond) && is.atomic(cond) && length(cond) > 0L) return(invisible(TRUE))
+  stop(sprintf(paste0("variant_filter(): clause %d, field '%s': a condition must be ",
+                      "an atomic vector of accepted values or an annotation_predicate()"),
+               clause_index, field))
+}
 
 #' Predefined Coding Category Annotation Masks
 #'

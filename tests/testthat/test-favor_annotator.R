@@ -35,15 +35,49 @@ skip_if_no_favor <- function() {
 
 # ========== Helper Function Tests ==========
 
-test_that(".default_favor_features returns all 20 numerical FAVOR features", {
+test_that(".default_favor_features covers the full FAVOR Essential DB content", {
   features <- GLOWr:::.default_favor_features()
 
   expect_type(features, "character")
-  expect_length(features, 20)
+  expect_length(features, 30)
+  expect_false(anyDuplicated(features) > 0)
+
+  # 20 numeric scores (17 aPCs + CADD/LINSIGHT/FATHMM-XF)
   expect_true("apc_conservation_v2" %in% features)
   expect_true("apc_micro_rna" %in% features)
   expect_true("cadd_phred" %in% features)
   expect_true("linsight" %in% features)
+
+  # 10 categorical fields. These are the regression guard for the 2026-08-21
+  # fix: without them an aGDS built with the default cannot run GLOW's own
+  # built-in coding masks, which read GENCODE category/exonic category and
+  # MetaSVM.
+  for (f in c("genecode_comprehensive_category",
+              "genecode_comprehensive_exonic_category",
+              "genecode_comprehensive_info",
+              "genecode_comprehensive_exonic_info",
+              "metasvm_pred", "genehancer", "cage_tc", "cage_promoter",
+              "rdhs", "rsid")) {
+    expect_true(f %in% features, info = f)
+  }
+})
+
+test_that("the default feature set covers every field the built-in coding masks read", {
+  features <- GLOWr:::.default_favor_features()
+  catalog <- GLOWr:::annotation_name_catalog
+  masks <- GLOWr:::.coding_annotation_masks()
+
+  mask_fields <- unique(unlist(lapply(masks, function(mask) {
+    unlist(lapply(mask, names))
+  })))
+  # Map catalog alias (e.g. "GENCODE.Category") to the aGDS node name.
+  nodes <- vapply(mask_fields, function(f) {
+    idx <- which(catalog$name == f)
+    if (length(idx)) catalog$dir[idx[1]] else f
+  }, character(1))
+
+  expect_true(all(nodes %in% features),
+              info = paste("missing:", paste(setdiff(nodes, features), collapse = ", ")))
 })
 
 test_that(".default_PI_features is a subset of .default_favor_features", {
@@ -963,4 +997,86 @@ test_that("GDS input with non-existent file errors gracefully", {
     ),
     "not found"
   )
+})
+
+# ========== Multi-chunk xsv join (regression, 2026-09-01) ==========
+# The per-chunk xsv joins used --left, so every chunk output carried ALL input
+# rows; after concatenation the keep-first dedup kept chunk 1's empty row and
+# silently dropped every later chunk's match (1000G chr22: 35% coverage).
+# This test drives .join_favor_xsv over two synthetic chunk files and asserts
+# a chunk-2 match survives. No FAVOR DB needed; skips without xsv.
+
+test_that("multi-chunk xsv join keeps matches from later chunks", {
+  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
+
+  db_dir <- withr::local_tempdir()
+  # Two chunk files with the DB's key column and one numeric + one string feature.
+  writeLines(c("variant_vcf,cadd_phred,genecode_comprehensive_category",
+               "22-100-A-C,10.5,intron",
+               "22-200-G-T,20.5,exonic"),
+             file.path(db_dir, "chr22_1.csv"))
+  writeLines(c("variant_vcf,cadd_phred,genecode_comprehensive_category",
+               "22-300-T-G,30.5,utr_3",
+               "22-400-C-A,40.5,intergenic"),
+             file.path(db_dir, "chr22_2.csv"))
+
+  variant_data <- data.frame(
+    VarInfo = c("22-100-A-C", "22-300-T-G", "22-999-A-G"),  # chunk1, chunk2, no match
+    stringsAsFactors = FALSE)
+
+  res <- GLOWr:::.join_favor_xsv(
+    variant_data = variant_data,
+    favor_db_path = db_dir,
+    chunks_needed = c("chr22_1.csv", "chr22_2.csv"),
+    features = c("cadd_phred", "genecode_comprehensive_category"),
+    verbose = 0)
+
+  expect_equal(nrow(res), 3L)
+  # Input row order must be preserved (merge had returned matched rows first).
+  expect_equal(res$VarInfo, variant_data$VarInfo)
+  expect_equal(res$cadd_phred, c(10.5, 30.5, NA_real_))          # chunk-2 match kept
+  expect_equal(res$genecode_comprehensive_category[1:2], c("intron", "utr_3"))
+  expect_true(is.na(res$genecode_comprehensive_category[3]))
+})
+
+test_that("a zero-match chunk (header-only join output) is handled", {
+  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
+
+  db_dir <- withr::local_tempdir()
+  # Chunk 1 matches NOTHING in the input; chunk 2 matches one variant. The
+  # inner join then feeds a header-only file to `xsv cat rows`, the edge an
+  # xsv version bump is most likely to change.
+  writeLines(c("variant_vcf,cadd_phred", "22-77777-G-A,7.5"),
+             file.path(db_dir, "chr22_1.csv"))
+  writeLines(c("variant_vcf,cadd_phred", "22-300-T-G,30.5"),
+             file.path(db_dir, "chr22_2.csv"))
+
+  res <- GLOWr:::.join_favor_xsv(
+    variant_data = data.frame(VarInfo = c("22-300-T-G", "22-999-A-G"),
+                              stringsAsFactors = FALSE),
+    favor_db_path = db_dir,
+    chunks_needed = c("chr22_1.csv", "chr22_2.csv"),
+    features = "cadd_phred",
+    verbose = 0)
+
+  expect_equal(res$VarInfo, c("22-300-T-G", "22-999-A-G"))
+  expect_equal(res$cadd_phred, c(30.5, NA_real_))
+})
+
+test_that("xsv join failure on a chunk is fatal, not silent", {
+  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
+
+  db_dir <- withr::local_tempdir()
+  # A chunk file WITHOUT the key column: xsv join exits nonzero.
+  writeLines(c("wrong_column,cadd_phred", "22-100-A-C,10.5"),
+             file.path(db_dir, "chr22_1.csv"))
+
+  expect_error(
+    GLOWr:::.join_favor_xsv(
+      variant_data = data.frame(VarInfo = "22-100-A-C", stringsAsFactors = FALSE),
+      favor_db_path = db_dir,
+      chunks_needed = "chr22_1.csv",
+      features = "cadd_phred",
+      verbose = 0),
+    "xsv join failed")
 })

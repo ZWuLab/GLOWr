@@ -602,19 +602,53 @@ compute_annotation_medians <- function(gds,
     anno_values[[field]] <- SeqArray::seqGetData(gds, gds_path)
   }
 
-  # Evaluate each clause (OR of ANDs)
+  # Evaluate each clause (OR of ANDs). A condition is either an atomic vector of
+  # accepted values (set membership) or an annotation_predicate().
   result <- rep(FALSE, n)
   for (clause in clauses) {
     clause_result <- rep(TRUE, n)
     for (field_name in names(clause)) {
-      accepted_values <- clause[[field_name]]
+      condition <- clause[[field_name]]
       field_values <- anno_values[[field_name]]
-      clause_result <- clause_result & (field_values %in% accepted_values)
+      term <- if (.is_annotation_predicate(condition)) {
+        .apply_annotation_predicate(field_values, condition)
+      } else {
+        field_values %in% condition
+      }
+      clause_result <- clause_result & term
     }
     result <- result | clause_result
   }
 
   result
+}
+
+
+#' Evaluate an annotation predicate against one field's values
+#'
+#' @param values Vector of annotation values (numeric or character) in
+#'   filtered-variant order.
+#' @param pred A \code{glow_annotation_predicate}.
+#' @return Logical vector, same length as \code{values}, never NA.
+#' @keywords internal
+#' @noRd
+.apply_annotation_predicate <- function(values, pred) {
+  op <- pred$op
+  if (op %in% c("nonempty", "empty")) {
+    present <- if (is.character(values)) !is.na(values) & nzchar(values) else !is.na(values)
+    return(if (op == "nonempty") present else !present)
+  }
+  if (op %in% c("in", "not_in")) {
+    hit <- values %in% pred$value
+    return(if (op == "in") hit else !hit)
+  }
+  num <- if (is.numeric(values)) values else suppressWarnings(as.numeric(as.character(values)))
+  cmp <- switch(op,
+                gt = num >  pred$value,
+                ge = num >= pred$value,
+                lt = num <  pred$value,
+                le = num <= pred$value)
+  cmp & !is.na(cmp)
 }
 
 

@@ -47,7 +47,47 @@
 #' "PASS" or "" (empty string). Approximately 10 variants are non-PASS.
 #'
 #' Requires: SNPRelate, SeqArray, gdsfmt.
+#'
+#' The fixture is built once per R session and copied for later callers, so it
+#' is byte-identical regardless of the order test files run in (see the note on
+#' `.test_agds_cache` below).
+#'
+#' File Log:
+#' - 2026-08-21: Modified by Claude Code (Fable 5), prompted by ZWu -- added the
+#'   session cache. Before this, a second create_test_agds() call in the same
+#'   session produced an ALLELE-FLIPPED fixture, making the suite order-dependent:
+#'   any new test file sorting before test-extract_variant_set.R silently broke
+#'   its rare-MAF tests.
+# Session cache for the synthetic aGDS.
+#
+# WHY THIS EXISTS: `SeqArray::seqSNP2GDS()` does not produce a byte-identical
+# result for identical input within one R session -- the second and later
+# conversions come back ALLELE-FLIPPED (dosage d becomes 2 - d, with the allele
+# strings unchanged). Because the fixture's "rare" variants are drawn at
+# MAF 0.001-0.009, a flip turns them into MAF ~0.991-0.999, and any test using
+# a rare-MAF filter then selects nothing.
+#
+# The practical consequence was an ORDER-DEPENDENT test suite: whichever file
+# called create_test_agds() first got one fixture and every later file got the
+# flipped one, so adding a new test file that happens to sort earlier broke
+# unrelated tests in test-extract_variant_set.R. set.seed() cannot fix this --
+# the genotype matrix handed to SNPRelate is already identical; the flip happens
+# inside the conversion.
+#
+# The fix is to build the fixture ONCE per session and hand out file copies, so
+# every caller gets byte-identical data no matter what order the files run in.
+.test_agds_cache <- new.env(parent = emptyenv())
+
 create_test_agds <- function(file_path) {
+
+  # -- Serve a copy of the session's already-built fixture, if there is one. --
+  cached <- .test_agds_cache$path
+  if (!is.null(cached) && file.exists(cached)) {
+    if (!file.copy(cached, file_path, overwrite = TRUE)) {
+      stop("create_test_agds(): failed to copy the cached fixture to ", file_path)
+    }
+    return(invisible(file_path))
+  }
 
   # -- Check required packages. SKIP (not error) the calling test if a GDS
   #    package is unavailable -- e.g. a CI runner that could not install the
@@ -372,8 +412,19 @@ create_test_agds <- function(file_path) {
   .add_anno("apc_transcription_factor",            apc_transcription_factor)
 
   # ============================================================================
-  # Step 6: Close GDS (handled by on.exit) and return path
+  # Step 6: Close GDS (handled by on.exit), cache, and return path
   # ============================================================================
+
+  # Populate the session cache AFTER the GDS is closed and flushed. Registering
+  # this as a later on.exit handler (they run in registration order) guarantees
+  # it fires after the closefn.gds() handler above, so the copied file is
+  # complete -- and avoids closing the handle twice.
+  on.exit({
+    cache_path <- tempfile("glowr_test_agds_cache_", fileext = ".gds")
+    if (file.copy(file_path, cache_path, overwrite = TRUE)) {
+      .test_agds_cache$path <- cache_path
+    }
+  }, add = TRUE, after = TRUE)
 
   invisible(file_path)
 }
