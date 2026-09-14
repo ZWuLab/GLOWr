@@ -1,26 +1,13 @@
+# ==============================================================================
+# File: get_PI_utils.R
+# Purpose: Summarizing, evaluating and visualizing trained PI (variant-importance
+#   score) ensemble models.
+
 #' PI Model Utility Functions
 #'
 #' Functions for summarizing, evaluating, and visualizing trained PI
 #' (variant-importance score) ensemble models. Supports both LASSO (glmnet)
 #' and GLM models.
-#'
-#' File Log (reverse chronological order):
-#' - 2026-06-13: Fixed by Claude Code (Opus 4.8, r-developer agent), prompted by
-#'   ZWu for the GLOWr release-gate Rd hygiene. Rewrote the unit-interval @return
-#'   range of the internal .compute_auc helper using \eqn{...} so the markup is
-#'   text, not a markdown link (the helper is @noRd, so this is preventive).
-#'   Docs-only; no logic change.
-#' - 2026-02-04: Modified by Claude Code - plot_PI_coefficient_summary: removed
-#'   "x." prefix from feature labels, replaced `las` param with `label_angle`
-#'   (default 45) for flexible rotation angle control (useful for publications).
-#' - 2026-02-04: Modified by Claude Code - GLM models: added p-value extraction
-#'   and significance metrics (pct_significant, mean_neg_log10_pval). Removed
-#'   coefficient boxplot (coefficients not comparable across features due to
-#'   different scales). Simplified plot function to bar plot only. Removed
-#'   duplicate .default_PI_features() (use version from get_PI_train.R).
-#' - 2026-02-03: Created by Claude Code - Initial implementation with
-#'   load_PI_models, summarize_PI_coefficients, predict_PI_ensemble,
-#'   evaluate_PI_models, and plotting functions (base R, no dependencies)
 #'
 #' @note Uses \code{impute_na_median()} and \code{.default_PI_features()} from
 #'   get_PI_train.R (accessible within package namespace).

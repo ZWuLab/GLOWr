@@ -1,0 +1,401 @@
+---
+title: "Annotating genotype data with FAVOR"
+author: "GLOWr Package"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Annotating genotype data with FAVOR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+has_arrow <- requireNamespace("arrow", quietly = TRUE)
+```
+
+## Annotate your genotype data
+
+`annotate_favor()` attaches functional annotation from the FAVOR database to the variants of a
+genotype data set and writes the annotated GDS (an aGDS) that GLOW and STAARpipeline scan. FAVOR
+keys every variant by `CHR-POS-REF-ALT` on GRCh38, where `REF` is the base the reference genome
+carries. Sequencing data in VCF form follow that convention, so their keys name FAVOR's rows
+directly. Genotyping-chip data, the usual input of a GWAS, often do not. A PLINK file carries the
+two alleles of each probe in the probe's own order and on the strand the probe was designed for,
+so the allele labelled `REF` may be the reference base, the other allele, or the complement of
+either.
+
+The annotator handles this with flexible matching. For each SNV it looks the key up as given,
+then with the two alleles swapped, then with both complemented, then both. It records which form
+found the row. It then compares the input's rsID with the rsID of the FAVOR row it found, and
+under the default policy it keeps a rewritten match only when the two agree. A rewritten match
+is also kept when the input carries no rsID, since nothing then speaks against it. The genotype
+data themselves are never modified. Only the lookup key is rewritten, and the aGDS is a copy of
+the input plus the annotation.
+
+The evidence that this works comes from an ALS case-control data set genotyped on an Illumina
+array, about 48,000 samples and 413,528 variants on chromosomes 1 to 22 after quality control,
+converted from PLINK to GDS. There the allele labelled `REF` is the reference base for 36% of the
+variants, the allele labelled `ALT` is for 14%, and neither is for 50%. Exact matching would
+annotate the first group only. Flexible matching found a row for all of them, and the chip's
+rsID agreed with the FAVOR row's for 99.89% of the 265,462 matches found by a rewritten key. The
+agreement ranged from 99.83% to 99.92% across the four key forms, the exact matches included.
+The default policy withheld the 289 rewritten matches the rsID did not confirm, about one in a
+thousand.
+
+The call for a chromosome of chip data is one line per argument. Replace the three paths with
+your own. The example does not create them.
+
+```{r gds, eval = FALSE}
+res <- annotate_favor(
+  variants      = "genotypes/chr22.gds",     # your GDS, one chromosome
+  favor_db_path = "/path/to/FAVOR2.0",       # or the FAVOR v1 chunk directory
+  match_method  = "flexible",                # rsid_policy = "require" is the default
+  output_agds   = "genotypes_favor/chr22.gds")
+table(res$match_tier)
+table(res$rsid_check)
+```
+
+Use `match_method = "flexible"` for chip data. Use `match_method = "exact"` for sequencing data
+whose alleles already follow the reference convention. A variant is then annotated only when its
+complete key exists in FAVOR. Appendix A gives the procedure in full, with every value that
+`match_tier` and `rsid_check` can take.
+
+## Computing costs
+
+The numbers below are the elapsed time of the annotation call, including the CSV and aGDS
+output, and the peak resident memory of the R process. They were measured on two data sets with
+the default feature set, one call per chromosome:
+
+- the ALS chip data set described above (5,970 of its variants are on chromosome 22).
+- the 1000 Genomes Project high-coverage sequencing panel, chromosome 22 only: 3,202 samples
+  and 1,066,557 variants, VCF converted to GDS.
+
+For chromosomes 1 to 22 the time is the sum over the calls and the memory is the largest peak
+among them. The CSV route's `xsv` child process is not counted in the memory.
+
+| Data | Database | Time | Peak memory |
+| --- | --- | --- | --- |
+| ALS chip, chr22 (5,970 variants) | FAVOR v1 CSV | 378 s | 0.47 GiB |
+| ALS chip, chr22 | FAVOR 2.0 Parquet | 37 s | 2.87 GiB |
+| ALS chip, chromosomes 1 to 22 (413,528 variants) | FAVOR v1 CSV | 40,006 s | 0.54 GiB |
+| ALS chip, chromosomes 1 to 22 | FAVOR 2.0 Parquet | 2,333 s | 3.61 GiB |
+| 1000 Genomes sequencing, chr22 (1,066,557 variants) | FAVOR v1 CSV | 466 s | 4.78 GiB |
+| 1000 Genomes sequencing, chr22 | FAVOR 2.0 Parquet | 205 s | 8.44 GiB |
+
+The Parquet route was about 17 times faster over the 22 chip chromosomes, about 10 times faster
+on chromosome 22 of the chip data, and about 2 times faster on chromosome 22 of the sequencing
+data. The two routes read the database differently. The CSV route streams every chunk that
+overlaps the input's position range through `xsv`, which for a chromosome of chip data is every
+chunk, so its time is set by the database and barely moves with the number of variants (378 to
+466 seconds). The Parquet route reads the position column of every block of rows, and reads the
+annotation fields only for the blocks that hold input positions, so its time and memory grow
+with the rows it keeps (37 to 205 seconds, 2.87 to 8.44 GiB). The measurements do not separate
+reading, matching and output, so they show the pattern and not its cause. The sample count
+enters only through the aGDS output, which copies the input GDS before adding the annotation
+nodes. The two databases also differ in content, so the rows are comparisons of two routes, not
+of two file formats.
+
+## Prepare the FAVOR database
+
+FAVOR is described in Zhou et al. (2023) and FAVOR 2.0 in Zhou et al. (2026), both listed
+under References. You obtain the database files from the FAVOR team. GLOWr does not
+redistribute them. The annotator reads two layouts:
+
+- **FAVOR v1 CSV**: the per-chromosome chunk files `chr<N>_<K>.csv` with the split table
+  `FAVORdatabase_chrsplit.csv`, a copy of which is bundled with GLOWr. The route can use the
+  optional command-line tool `xsv` to join the chunks to the input's positions. The tool's
+  author has archived its repository, but existing installations work. Without it, GLOWr reads
+  the chunks with `data.table::fread()`. Set `use_xsv = FALSE` to choose that route explicitly.
+- **FAVOR 2.0 Parquet**: one file `chromosome_<N>.parquet` per chromosome, sorted by position,
+  with the annotation in nested fields. It needs the R package `arrow`.
+
+`favor_db_format = "auto"`, the default, detects the layout from the directory. A directory
+holding both layouts, or neither, is an error, and you then name the format yourself. Both
+readers hand their rows to the same matching procedure. The two releases differ in content,
+however, so a variant can match in one and not the other, and its annotation values can differ.
+
+## Inspect the results
+
+The returned table carries the input columns, one column per annotation feature, and three
+columns that say what happened to each variant. `match_tier` is the outcome. `favor_key` is the
+`CHR-POS-REF-ALT` of the FAVOR row that supplied the annotation, or of the row withheld.
+`rsid_check` is the rsID evidence. Read `table(res$match_tier)` first. On chip data you expect
+the four key forms and a small number of `rsid_conflict`. On sequencing data you expect `exact`
+and the reasons a key was not found.
+
+The aGDS stores the annotation and two of the three records:
+
+| What | Where in the aGDS |
+| --- | --- |
+| one node per feature | `annotation/info/FunctionalAnnotation/<feature>` |
+| the outcome per variant | `annotation/info/favor_match_tier` |
+| the rsID check per variant | `annotation/info/favor_rsid_check` |
+
+`favor_key` is not stored in the aGDS. Keep the returned table, or request `output_csv`, when
+you need the keys. The `FunctionalAnnotation` folder also carries the provenance as attributes,
+read with `gdsfmt::get.attr.gdsn()`. They record:
+
+- the database format, path and files, with their sizes.
+- the SHA-256 entries of a `SHA256SUMS` file, when one sits in the database directory or its
+  parent.
+- the release label you passed as `favor_release`, recorded as `"unknown"` when you did not.
+- the GLOWr version, the matching settings, the rsID policy and its source.
+- the counts per outcome and per check, and the date.
+
+One call per chromosome is the natural unit, and `variant_filter` restricts a call to a
+chromosome or a region of a larger GDS.
+
+## Normalize chip data before conversion (optional)
+
+Flexible matching finds the right FAVOR row without touching the genotype file. It does not
+change the file's own allele labels, which stay in the probe's order and strand. Another tool
+that reads those labels as genome `REF` and `ALT`, for example when you export the data or merge
+them with external summary statistics, will read them wrongly. If that matters to you, consider
+normalizing the PLINK files before converting them to GDS:
+
+- PLINK 2 `--ref-from-fa` sets `REF` from a reference FASTA at every variant where one allele
+  matches it, and `--normalize` left-aligns indels.
+- PLINK 2 `--ref-allele` (or PLINK 1.9 `--a2-allele`) sets the reference allele from a list.
+- PLINK 1.9 `--flip` complements listed variants.
+
+This is a recommendation, not a requirement. Normalization cannot resolve a palindromic pair
+(A/T or C/G) either, since it reads the same on both strands. Whether or not you normalize, the
+outcome and the rsID check are recorded, so the annotation step documents what it did.
+
+## Appendix A. How matching works
+
+Flexible matching uses three steps for every SNV:
+
+1. Find a candidate FAVOR row by trying the input key and the allowed rewritings of it.
+2. Compare the input's rsID with the candidate row's rsID.
+3. Apply `rsid_policy` to decide whether the candidate's annotation is kept.
+
+Indels match by the exact key under both methods, because an indel's `REF` is a stretch of
+genome sequence and its swapped key names a different variant.
+
+### Step 1: the allele lookup and its tiers
+
+FAVOR keys every row by `CHR-POS-REF-ALT` in the VCF convention: `REF` is the base the GRCh38
+reference genome carries at the position, read on the forward strand, and `ALT` is the other
+base. For an SNV up to three rows exist at a position, one per alternative base. Take an input
+SNV whose file labels the alleles `a1` (as `REF`) and `a2` (as `ALT`), and let `r` be the
+reference base that every FAVOR row at that position shares. Write `c(x)` for the complement of
+base `x`. The annotator forms the key in the four forms below, in this order, and takes the
+first one that names a row. `match_tier` records which form it was.
+
+| Tier | Key looked up | Applies when | Lookup transformation |
+| --- | --- | --- | --- |
+| `exact` | `a1-a2` | `a1 = r` | none |
+| `swapped` | `a2-a1` | `a2 = r` | the two alleles swapped |
+| `flipped` | `c(a1)-c(a2)` | `c(a1) = r` | both alleles complemented |
+| `flipped_swapped` | `c(a2)-c(a1)` | `c(a2) = r` | both complemented and swapped |
+
+Under `match_method = "exact"` only the first form is tried. A PLINK file converted with
+`SeqArray::seqBED2GDS()` has its second allele in the GDS `REF` position and its first in `ALT`.
+The conversion does not establish whether either is the genome's reference base.
+
+A tier is a record of the lookup, not a verified strand. It rests on one assumption: that the
+input is the reference-based substitution at that position, in some allele order and on some
+strand. Under that assumption, and when FAVOR carries the row, the lookup is unique, because for
+a pair of bases that is not its own complement the pair and its complement together cover A, C, G
+and T, so exactly one of the four forms carries `r`. The alleles alone leave two ambiguities:
+
+- A palindromic pair (A/T or C/G) reads the same on both strands. When it contains `r` the tier
+  is `exact` or `swapped`, and that tier does not say which strand the probe used. A palindromic
+  pair that lacks `r` cannot be matched.
+- A pair of two non-reference alleles, whether genuine or the product of a genotyping or build
+  error, is read as a strand flip, because the lookup cannot tell it apart from one.
+
+The rsID check of step 2 supplies the evidence that the alleles cannot.
+
+When no form names a row, or the key names no allele pair, `match_tier` carries the reason:
+
+| Outcome | Meaning |
+| --- | --- |
+| `uncovered` | FAVOR has no row at the position, or a position-only key has no SNV row to aggregate |
+| `unmatched_alt` | the position is covered and the reference base is found by the input's `REF` (for an indel, its first base) or, under flexible matching, by one of the rewritings, but FAVOR has no row for that allele pair |
+| `unmatched_ref` | the position is covered, the input's `REF` is not `r`, and no rewriting allowed by the method finds `r` (under exact matching, no rewriting is allowed) |
+| `position_only` | the key carries no alleles (`CHR-POS-NA-NA`), as Appendix B explains |
+| `rsid_conflict` | a `swapped`, `flipped` or `flipped_swapped` candidate withheld by the policy (step 3) |
+| `no_database` | the database has no data for the chromosome |
+| `unsupported_allele` | the key has an allele other than A, C, G or T, or another unsupported form (a malformed position stops the call with an error instead) |
+
+### Step 2: the rsID check
+
+A FAVOR row is one substitution, and its `rsid` field holds dbSNP's identifier for that
+substitution when dbSNP lists it. A matched row may carry no rsID. When it does, an rsID names
+both the site and the allele pair, so agreement with the input's identifier confirms the row
+whatever form found it.
+
+The check uses the same rule for every input. For a GDS, the identifier is the node
+`annotation/id`, and where it came from depends on how the GDS was made:
+
+| Input | Where the identifier comes from |
+| --- | --- |
+| a GDS | `annotation/id` |
+| PLINK converted with `SeqArray::seqBED2GDS()` | column 2 of the `.bim`, copied to `annotation/id` |
+| VCF converted with `SeqArray::seqVCF2GDS()` | the VCF `ID` column, copied to `annotation/id` |
+| a data.frame | its `rsID` column |
+
+A genotyping chip normally carries the rsID of the intended site there, though some probes carry
+vendor identifiers. A sequencing VCF often carries a missing value or a `chr:pos:ref:alt` token
+unless it was annotated with dbSNP. An identifier counts as an rsID only when it is `rs`
+followed by digits, in any case and ignoring surrounding whitespace. Anything else counts as no
+rsID. For every matched row `rsid_check` records one value:
+
+| `rsid_check` | Meaning |
+| --- | --- |
+| `same` | the input's rsID equals the matched FAVOR row's |
+| `differs` | both carry an rsID and they differ |
+| `chip_none` | the input carries no rsID (whether or not the row carries one) |
+| `favor_none` | the input carries an rsID and the matched row carries none |
+| missing | no row was matched, or the key is position-only |
+
+The rsID is evidence about the row the alleles found. It is never used to find a row.
+
+### Step 3: the policy
+
+`rsid_policy` says what to do with the evidence:
+
+- `"require"`, the default, withholds a `swapped`, `flipped` or `flipped_swapped` candidate
+  whose check is `differs` or `favor_none`. The outcome becomes `rsid_conflict`, the variant
+  carries no annotation, `rsid_check` keeps the value that withheld it, and `favor_key` still
+  names the withheld row so that you can inspect it. An `exact` match is never withheld, since
+  it used the key as given. A match checked `chip_none` is kept, since the input offers no
+  evidence either way.
+- `"record"` keeps every match and only records the check. Use it to see what the lookup alone
+  finds, not for an annotation you will analyze.
+
+Under the default, then, a rewritten key is accepted only when the rsID confirms it or when the
+input has no rsID to check against. A sequencing data set whose identifiers are not rsIDs gets
+`chip_none` on every matched variant, and nothing is withheld.
+
+## Appendix B. Keys without alleles
+
+A key without alleles, `CHR-POS-NA-NA`, names no row. Literature-curated variant tables often
+come this way. The annotator reports such a key as `position_only` and offers two ways to fill
+its annotation from the SNV rows at the position (indel rows are never included):
+
+- `na_allele_method = "average"`, the default, gives each numeric feature the mean of its
+  non-missing values over the SNV rows at the position, and leaves it missing when every value
+  is missing. A string feature cannot be averaged and takes the first non-empty value.
+- `"first"` takes every feature from the first SNV row at the position.
+
+A position that carries no SNV row is `uncovered`.
+
+Treat this as a fallback, not as annotation of the variant. The mean over three substitutions is
+a quantity no variant has, and the first string value at a position is an arbitrary pick. We
+recommend resolving the alleles first. When the table carries rsIDs, resolve them to alleles,
+for example through dbSNP or the Ensembl REST variation endpoint, and annotate the specific
+variants with exact matching. When it carries only positions, look the position up in dbSNP
+before falling back to the average.
+
+## Appendix C. A worked example
+
+The database below is made up for illustration. It has the layout of a FAVOR v1 chunk, with a
+`rsid` column on the row of the substitution dbSNP lists and empty on the other rows at the
+position. It is written to a temporary directory together with its split table.
+
+```{r build-db}
+library(GLOWr)
+db_dir <- tempfile("favor_demo_"); dir.create(db_dir)
+
+favor_rows <- data.frame(
+  chromosome = 22L,
+  position   = c(1000L, 1000L, 1000L, 2000L, 2000L, 2000L, 2000L),
+  ref_vcf    = c("G", "G", "G", "A", "A", "A", "A"),
+  alt_vcf    = c("A", "C", "T", "C", "G", "T", "AT"),
+  cadd_phred = c(7.25, 6.875, 7.0, 4.125, 4.25, 4.375, 9.5),
+  genecode_comprehensive_category = c("exonic", "exonic", "exonic",
+                                      "intronic", "intronic", "intronic", "intronic"),
+  rsid       = c("rs1000", "", "", "rs2001", "", "", "rs2007"),
+  stringsAsFactors = FALSE)
+favor_rows$variant_vcf <- with(favor_rows, paste(chromosome, position, ref_vcf, alt_vcf, sep = "-"))
+
+data.table::fwrite(favor_rows, file.path(db_dir, "chr22_1.csv"))
+data.table::fwrite(data.frame(Chr = 22L, File_No = 1L, Start_Pos = 1L, End_Pos = 1e7),
+                   file.path(db_dir, "FAVORdatabase_chrsplit.csv"))
+```
+
+The input imitates chip data: the same site in the four forms a probe can produce, a flipped pair
+whose rsID differs from FAVOR's, a palindromic pair, a position-only key and an indel. The
+`rsID` column is what a GDS input supplies through `annotation/id`.
+
+```{r inputs}
+chip <- data.frame(
+  VarInfo = c("22-1000-G-A", "22-1000-A-G", "22-1000-C-T", "22-1000-T-C",
+              "22-1000-C-T", "22-1000-C-G", "22-2000-NA-NA", "22-2000-A-AT"),
+  rsID    = c("rs1000", "rs1000", "rs1000", "rs1000",
+              "rs9999", "rs1000", NA, "rs2007"),
+  note    = c("as FAVOR keys it", "alleles swapped", "other strand", "other strand, swapped",
+              "other strand, rsID differs", "palindromic pair", "position only", "indel"),
+  stringsAsFactors = FALSE)
+```
+
+Under exact matching, the first SNV and the indel are found and the position-only key is
+aggregated. Under flexible matching every SNV finds a row, and the tier and the rsID check say
+how. This first flexible call uses `rsid_policy = "record"` so that the table shows what the
+lookup alone finds.
+
+```{r exact-vs-flexible}
+feats <- c("cadd_phred", "genecode_comprehensive_category")
+exact <- annotate_favor(chip, db_dir, features = feats, match_method = "exact",
+                        use_xsv = FALSE, verbose = 0)
+flex  <- annotate_favor(chip, db_dir, features = feats, match_method = "flexible",
+                        rsid_policy = "record", use_xsv = FALSE, verbose = 0)
+cbind(chip[, c("VarInfo", "note")],
+      exact = exact$match_tier,
+      flexible = flex$match_tier, key = flex$favor_key, rsid_check = flex$rsid_check,
+      cadd = flex$cadd_phred)
+```
+
+Three points to read off this table. First, the three rewritten forms of the first site all
+carry the value of the row `22-1000-G-A`, never a mean over the position. Second, the fifth
+input, the same alleles with a different rsID, is matched the same way and the check says
+`differs`. Third, the position-only key averages the three SNV rows at position 2000 (`4.25`)
+and leaves the indel row out.
+
+Under the default policy two inputs are withheld: the fifth, because its rsID differs from the
+row's, and the sixth, the palindromic pair, because the row it found carries no rsID to confirm
+the swap. Their keys stay in `favor_key`, their annotation is missing, and nothing else changes.
+
+```{r require}
+req <- annotate_favor(chip, db_dir, features = feats, match_method = "flexible",
+                      use_xsv = FALSE, verbose = 0)
+cbind(chip[, "VarInfo", drop = FALSE], tier = req$match_tier, key = req$favor_key,
+      rsid_check = req$rsid_check, cadd = req$cadd_phred)
+```
+
+The same content in the FAVOR 2.0 layout gives the same outcomes. This chunk runs only when
+`arrow` is installed. It writes the rows as one Parquet file with the nested fields the
+annotator reads (`main.cadd.phred`, `gencode.region_type`, `dbsnp.rsid`), and checks that the
+outcome, the rsID check and the CADD value agree with the CSV run.
+
+```{r parquet, eval = has_arrow}
+pq_dir <- tempfile("favor2_demo_"); dir.create(pq_dir)
+cadd <- data.frame(row = seq_len(nrow(favor_rows)))
+cadd$cadd <- data.frame(phred = favor_rows$cadd_phred); cadd$row <- NULL
+tb <- arrow::arrow_table(
+  position = favor_rows$position, ref_vcf = favor_rows$ref_vcf, alt_vcf = favor_rows$alt_vcf,
+  main    = arrow::StructArray$create(cadd),
+  gencode = arrow::StructArray$create(
+    data.frame(region_type = favor_rows$genecode_comprehensive_category)),
+  dbsnp   = arrow::StructArray$create(data.frame(rsid = favor_rows$rsid)))
+arrow::write_parquet(tb, file.path(pq_dir, "chromosome_22.parquet"))
+
+pq <- annotate_favor(chip, pq_dir, features = feats, match_method = "flexible", verbose = 0)
+identical(pq$match_tier, req$match_tier) && identical(pq$rsid_check, req$rsid_check) &&
+  identical(pq$cadd_phred, req$cadd_phred)
+```
+
+## References
+
+- Zhou, H., Arapoglou, T., Li, X., et al. (2023). FAVOR: functional annotation of variants
+  online resource and annotator for variation across the human genome. *Nucleic Acids
+  Research*, 51(D1), D1300-D1311. doi:10.1093/nar/gkac966.
+- Zhou, H., Verma, V., Li, X., et al. (2026). FAVOR 2.0: A reengineered functional annotation of
+  variants online resource for interpreting genomic variation. *Nucleic Acids Research*, 54(D1),
+  D1405-D1414. doi:10.1093/nar/gkaf1217.
+- PLINK 1.9 and PLINK 2.0 data management documentation,
+  https://www.cog-genomics.org/plink/1.9/data and https://www.cog-genomics.org/plink/2.0/data.

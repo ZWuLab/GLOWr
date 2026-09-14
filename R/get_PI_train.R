@@ -1,27 +1,12 @@
+# ==============================================================================
+# File: get_PI_train.R
+# Purpose: PI (variant-importance score) ensemble model training from pre-annotated
+#   case and control variant data.
+
 #' PI Model Training Functions
 #'
 #' Functions for training PI (variant-importance score) ensemble models
 #' from pre-annotated case and control variant data.
-#'
-#' File Log (reverse chronological order):
-#' - 2026-06-11: Modified by Claude Code (Opus 4.8) via the r-developer agent,
-#'   prompted by ZWu -- annotate_favor aGDS-format fix: .load_control_gds() now
-#'   reads EITHER the STAARpipeline sub-node folder format (per-feature sub-nodes,
-#'   the format annotate_favor now writes) OR the legacy single-matrix format
-#'   (read.gdsn + feature_names attr). Branches on length(ls.gdsn(node)) > 0 before
-#'   any read.gdsn (which errors on a folder node). Legacy matrix fixtures still load.
-#' - 2026-02-03: Renamed by Claude Code - train_PI_models.R -> get_PI_train.R
-#'   for consistent naming with other get_PI_*.R files
-#' - 2026-02-02: Modified by Claude Code - Changed controls_per_model to default
-#'   NULL (auto-calculate from n_cases); added controls_multiplier parameter
-#' - 2026-02-02: Modified by Claude Code - Fixed .load_control_gds() to use
-#'   gdsfmt::read.gdsn for matrix-based FunctionalAnnotation; added GDS
-#'   proportional sampling (.load_gds_with_proportional_sampling)
-#' - 2026-02-02: Modified by Claude Code - Implemented proportional sampling
-#'   during file loading to limit memory; default max_controls=50000
-#' - 2026-02-02: Modified by Claude Code - Reorganized per project rules:
-#'   main functions first, helpers last; added max_controls parameter
-#' - 2026-02-02: Created by Claude Code - Initial implementation
 #'
 #' @name get_PI_train
 #' @docType package

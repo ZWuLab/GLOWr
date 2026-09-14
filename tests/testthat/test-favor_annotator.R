@@ -80,6 +80,21 @@ test_that("the default feature set covers every field the built-in coding masks 
               info = paste("missing:", paste(setdiff(nodes, features), collapse = ", ")))
 })
 
+test_that("every catalog name resolves to a node the annotator writes by default", {
+  # The three aPC aliases inherited from STAARpipeline-Tutorial pointed at nodes
+  # the FAVOR databases carry only under versioned names (plan 11, corrected
+  # 2026-09-13); every catalog dir must be a default feature.
+  catalog <- GLOWr:::annotation_name_catalog
+  features <- GLOWr:::.default_favor_features()
+  expect_true(all(catalog$dir %in% features),
+              info = paste("not written by default:",
+                           paste(setdiff(catalog$dir, features), collapse = ", ")))
+  alias <- function(nm) catalog$dir[match(nm, catalog$name)]
+  expect_equal(alias("aPC.Protein"), "apc_protein_function_v3")
+  expect_equal(alias("aPC.Conservation"), "apc_conservation_v2")
+  expect_equal(alias("aPC.LocalDiversity"), "apc_local_nucleotide_diversity_v3")
+})
+
 test_that(".default_PI_features is a subset of .default_favor_features", {
   pi <- GLOWr:::.default_PI_features()
   favor <- GLOWr:::.default_favor_features()
@@ -430,27 +445,6 @@ test_that("annotate_favor flexible matching handles swapped alleles (strand flip
   expect_s3_class(result_exact, "data.frame")
   expect_s3_class(result_flexible, "data.frame")
   expect_equal(nrow(result_flexible), 1)
-})
-
-test_that("annotate_favor flexible matching falls back to position average", {
-  skip_if_no_favor()
-
-  # Create a variant that won't match exactly but position exists
-  test_variants <- data.frame(
-    VarInfo = c("21-17079907-X-Y"),  # Invalid alleles, position should exist
-    stringsAsFactors = FALSE
-  )
-
-  result_flexible <- annotate_favor(
-    variants = test_variants,
-    favor_db_path = get_favor_db_path(),
-    match_method = "flexible",
-    verbose = 0
-  )
-
-  expect_s3_class(result_flexible, "data.frame")
-  expect_equal(nrow(result_flexible), 1)
-  # If position exists in FAVOR, we should get annotations via position average
 })
 
 test_that("annotate_favor flexible matching preserves exact match priority", {
@@ -999,84 +993,478 @@ test_that("GDS input with non-existent file errors gracefully", {
   )
 })
 
-# ========== Multi-chunk xsv join (regression, 2026-09-01) ==========
-# The per-chunk xsv joins used --left, so every chunk output carried ALL input
-# rows; after concatenation the keep-first dedup kept chunk 1's empty row and
-# silently dropped every later chunk's match (1000G chr22: 35% coverage).
-# This test drives .join_favor_xsv over two synthetic chunk files and asserts
-# a chunk-2 match survives. No FAVOR DB needed; skips without xsv.
+# ==============================================================================
+# Self-contained tests of the corrected matching and both database backends
+# ==============================================================================
+# Matching, corrected design"; gates G1 and G2 of
+# synthetic (decision D2: no FAVOR content ships with the package). One small
+# chr22 database is written once as FAVOR v1 CSV chunks and once as a FAVOR 2.0
+# style Parquet file with nested columns, so the two backends read the same
+# content.
 
-test_that("multi-chunk xsv join keeps matches from later chunks", {
-  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
-
-  db_dir <- withr::local_tempdir()
-  # Two chunk files with the DB's key column and one numeric + one string feature.
-  writeLines(c("variant_vcf,cadd_phred,genecode_comprehensive_category",
-               "22-100-A-C,10.5,intron",
-               "22-200-G-T,20.5,exonic"),
-             file.path(db_dir, "chr22_1.csv"))
-  writeLines(c("variant_vcf,cadd_phred,genecode_comprehensive_category",
-               "22-300-T-G,30.5,utr_3",
-               "22-400-C-A,40.5,intergenic"),
-             file.path(db_dir, "chr22_2.csv"))
-
-  variant_data <- data.frame(
-    VarInfo = c("22-100-A-C", "22-300-T-G", "22-999-A-G"),  # chunk1, chunk2, no match
+# Positions of the synthetic database (all on chr22):
+#   1000: REF G, SNV rows G-A, G-C, G-T              (complete position)
+#   2000: REF A, SNV rows A-C, A-G, A-T and indel A-AT
+#   3000: REF C, one SNV row C-T                     (sparse: unmatched_alt)
+#   4000: REF T, rows T-A (all features missing), T-C, T-G
+#   5000: REF C, SNV rows C-A, C-G, C-T and deletion CAT-C
+#   6000: no rows                                     (uncovered)
+#   7000: REF A, the indel row A-AT only              (no SNV row: a position-only
+#                                                      key is uncovered, decision D10)
+# The rsid column imitates FAVOR: dbSNP's rsID sits on the specific REF-ALT row
+# dbSNP knows and the other rows at the position carry none (decision D9).
+.syn_rows <- function() {
+  d <- data.frame(
+    position = c(1000L, 1000L, 1000L, 2000L, 2000L, 2000L, 2000L, 3000L,
+                 4000L, 4000L, 4000L, 5000L, 5000L, 5000L, 5000L, 7000L),
+    ref_vcf  = c("G", "G", "G", "A", "A", "A", "A", "C", "T", "T", "T",
+                 "C", "C", "C", "CAT", "A"),
+    alt_vcf  = c("A", "C", "T", "C", "G", "T", "AT", "T", "A", "C", "G",
+                 "A", "G", "T", "C", "AT"),
     stringsAsFactors = FALSE)
+  # Dyadic values, exactly representable in float32 and in decimal text, so the
+  # CSV and Parquet copies hold bitwise-identical numbers.
+  d$cadd_phred <- c(1.25, 2.5, 3.75, 4.125, 4.25, 4.375, 9.5, 5.5,
+                    NA, 6.125, 6.25, 7.125, 7.25, 7.375, 8.5, 10.5)
+  d$linsight   <- c(0.5, 0.25, 0.125, 0.5, 0.5, 0.5, NA, 0.75,
+                    NA, 0.25, 0.25, 0.5, 0.5, 0.5, NA, NA)
+  d$genecode_comprehensive_category <- c(rep("exonic", 3), rep("intronic", 4), "UTR3",
+                                         NA, "intergenic", "intergenic",
+                                         rep("exonic", 4), "intronic")
+  d$metasvm_pred <- c("D", "T", "", rep("", 13))
+  d$rsid <- c("rs1000", "", "rs1003", "rs2001", "", "", "rs2007", "rs3000",
+              "", "rs4002", "", "rs5001", "rs5002", "rs5003", "rs5004", "rs7007")
+  d$variant_vcf <- paste("22", d$position, d$ref_vcf, d$alt_vcf, sep = "-")
+  d
+}
 
-  res <- GLOWr:::.join_favor_xsv(
-    variant_data = variant_data,
-    favor_db_path = db_dir,
-    chunks_needed = c("chr22_1.csv", "chr22_2.csv"),
-    features = c("cadd_phred", "genecode_comprehensive_category"),
-    verbose = 0)
+# Write the rows as a one-chunk FAVOR v1 CSV database (plus a second, empty-range
+# chunk so that chunk selection is exercised) and its split table.
+.syn_csv_db <- function(dir) {
+  d <- .syn_rows()
+  cols <- c("variant_vcf", "chromosome", "position", "ref_vcf", "alt_vcf",
+            "cadd_phred", "linsight", "genecode_comprehensive_category", "metasvm_pred",
+            "rsid")
+  d$chromosome <- 22L
+  data.table::fwrite(d[d$position < 4000, cols], file.path(dir, "chr22_1.csv"))
+  data.table::fwrite(d[d$position >= 4000, cols], file.path(dir, "chr22_2.csv"))
+  data.table::fwrite(
+    data.frame(Chr = c(22L, 22L), File_No = 1:2, Start_Pos = c(1L, 3501L),
+               End_Pos = c(3500L, 1e7)),
+    file.path(dir, "FAVORdatabase_chrsplit.csv"))
+  dir
+}
 
-  expect_equal(nrow(res), 3L)
-  # Input row order must be preserved (merge had returned matched rows first).
-  expect_equal(res$VarInfo, variant_data$VarInfo)
-  expect_equal(res$cadd_phred, c(10.5, 30.5, NA_real_))          # chunk-2 match kept
-  expect_equal(res$genecode_comprehensive_category[1:2], c("intron", "utr_3"))
-  expect_true(is.na(res$genecode_comprehensive_category[3]))
+# Write the same rows as a FAVOR 2.0 style Parquet file with nested columns,
+# the scores stored as float32 (as FAVOR 2.0 stores them) and one row per row
+# group, so that a position's rows straddle row groups, some groups hold no
+# queried row, and the reader's reopening after eight groups is exercised.
+# `drop` names features whose leaf columns are left out of the file.
+.syn_parquet_db <- function(dir, drop = character(0), rows_per_group = 1L) {
+  d <- .syn_rows()
+  # arrow::write_parquet() rejects nested data.frame columns, so the struct
+  # columns are built as StructArrays (main.cadd.phred is a struct in a struct).
+  cadd <- data.frame(row = seq_len(nrow(d))); cadd$cadd <- data.frame(phred = d$cadd_phred)
+  cadd$row <- NULL
+  cols <- list(
+    position = d$position, ref_vcf = d$ref_vcf, alt_vcf = d$alt_vcf,
+    variant_vcf = d$variant_vcf, linsight = d$linsight,
+    main    = arrow::StructArray$create(cadd),
+    gencode = arrow::StructArray$create(
+      data.frame(region_type = d$genecode_comprehensive_category, stringsAsFactors = FALSE)),
+    dbnsfp  = arrow::StructArray$create(
+      data.frame(metasvm_pred = d$metasvm_pred, stringsAsFactors = FALSE)),
+    dbsnp   = arrow::StructArray$create(
+      data.frame(rsid = d$rsid, stringsAsFactors = FALSE)))
+  types <- list(
+    position = arrow::int64(), ref_vcf = arrow::string(), alt_vcf = arrow::string(),
+    variant_vcf = arrow::string(), linsight = arrow::float32(),
+    main = arrow::struct(cadd = arrow::struct(phred = arrow::float32())),
+    gencode = arrow::struct(region_type = arrow::string()),
+    dbnsfp = arrow::struct(metasvm_pred = arrow::string()),
+    dbsnp = arrow::struct(rsid = arrow::string()))
+  omit <- c(linsight = "linsight", cadd_phred = "main", genecode_comprehensive_category = "gencode",
+            metasvm_pred = "dbnsfp")[drop]
+  cols <- cols[setdiff(names(cols), omit)]; types <- types[names(cols)]
+  tb <- do.call(arrow::arrow_table, cols)$cast(do.call(arrow::schema, types))
+  arrow::write_parquet(tb, file.path(dir, "chromosome_22.parquet"), chunk_size = rows_per_group)
+  dir
+}
+
+.syn_feats <- function() {
+  c("cadd_phred", "linsight", "genecode_comprehensive_category", "metasvm_pred")
+}
+
+# One input per outcome. Expected outcome under flexible and exact matching,
+# the database row that must supply the annotation, the input's rsID and the
+# expected rsID check (decision D9), and the outcome under
+# rsid_policy = "require" (a transformed match checked differs or favor_none is
+# withheld as rsid_conflict; exact matches and chip_none checks are kept).
+.syn_inputs <- function() {
+  data.frame(
+    VarInfo = c("22-1000-G-A",      # exact
+                "22-1000-A-G",      # swapped
+                "22-1000-C-T",      # flipped (reverse strand of G-A); rsID differs
+                "22-1000-T-C",      # flipped_swapped; no rsID on the input
+                "22-1000-A-C",      # flipped_swapped: read as G-T (design's example)
+                "22-1000-C-G",      # palindromic containing r: swapped to G-C, no rsID in FAVOR
+                "22-1000-A-T",      # palindromic lacking r: unmatched_ref
+                "22-2000-A-AT",     # indel, exact
+                "22-5000-CAT-C",    # deletion, exact; no rsID on the input
+                "22-5000-C-CAT",    # reciprocal of a deletion: never swapped
+                "22-5000-GAT-G",    # indel whose anchor differs from r
+                "22-3000-C-A",      # sparse position: unmatched_alt
+                "22-4000-T-A",      # matched row whose features (and rsid) are all missing
+                "22-6000-A-G",      # uncovered
+                "22-2000-NA-NA",    # position-only, averaged over the 3 SNV rows
+                "22-6000-NA-NA",    # position-only, uncovered
+                "22-7000-NA-NA",    # position-only at an indel-only position: uncovered (D10)
+                "22-7000-A-AT",     # the indel row itself: exact
+                "22-1000-G-<DEL>",  # symbolic allele
+                "22-1000-G-A,C",    # multiallelic record
+                "22-1000-G-G",      # identical alleles
+                "22-1000-g-a",      # lower case: the lookup key is upper-cased; rsID differs
+                "chr22-1000-G-A",   # chr prefix; rsID in upper case
+                "22-1000-G-A",      # duplicate of the first row
+                "23-100-A-G"),      # chromosome without a database
+    rsID = c("rs1000", "rs1000", "rs9999", NA, "rs1003", "rs1000", "rs1000", "rs2007",
+             "", NA, NA, "rs3000", "rs4000", "rs6000", "rs2000", NA, NA, "rs7007",
+             NA, NA, NA, "rs7777", "RS1000", "rs1000", "rs23"),
+    flexible = c("exact", "swapped", "flipped", "flipped_swapped", "flipped_swapped",
+                 "swapped", "unmatched_ref", "exact", "exact", "unmatched_alt",
+                 "unmatched_ref", "unmatched_alt", "exact", "uncovered", "position_only",
+                 "uncovered", "uncovered", "exact", "unsupported_allele", "unsupported_allele",
+                 "unsupported_allele", "exact", "exact", "exact", "no_database"),
+    exact = c("exact", "unmatched_ref", "unmatched_ref", "unmatched_ref", "unmatched_ref",
+              "unmatched_ref", "unmatched_ref", "exact", "exact", "unmatched_alt",
+              "unmatched_ref", "unmatched_alt", "exact", "uncovered", "position_only",
+              "uncovered", "uncovered", "exact", "unsupported_allele", "unsupported_allele",
+              "unsupported_allele", "exact", "exact", "exact", "no_database"),
+    require = c("exact", "swapped", "rsid_conflict", "flipped_swapped", "flipped_swapped",
+                "rsid_conflict", "unmatched_ref", "exact", "exact", "unmatched_alt",
+                "unmatched_ref", "unmatched_alt", "exact", "uncovered", "position_only",
+                "uncovered", "uncovered", "exact", "unsupported_allele", "unsupported_allele",
+                "unsupported_allele", "exact", "exact", "exact", "no_database"),
+    key_flexible = c("22-1000-G-A", "22-1000-G-A", "22-1000-G-A", "22-1000-G-A",
+                     "22-1000-G-T", "22-1000-G-C", NA, "22-2000-A-AT", "22-5000-CAT-C",
+                     NA, NA, NA, "22-4000-T-A", NA, NA, NA, NA, "22-7000-A-AT", NA, NA, NA,
+                     "22-1000-G-A", "22-1000-G-A", "22-1000-G-A", NA),
+    rsid_check = c("same", "same", "differs", "chip_none", "same", "favor_none", NA,
+                   "same", "chip_none", NA, NA, NA, "favor_none", NA, NA, NA, NA, "same",
+                   NA, NA, NA, "differs", "same", "same", NA),
+    stringsAsFactors = FALSE)
+}
+
+.syn_annotate <- function(db, method, format, rsid_policy = "record", ...) {
+  # "record" by default here, so that the outcome tables of the fixture (which
+  # describe the lookup alone) apply; the package default is "require".
+  inp <- .syn_inputs()
+  suppressWarnings(annotate_favor(
+    variants = inp[, c("VarInfo", "rsID")], favor_db_path = db,
+    features = .syn_feats(), match_method = method, favor_db_format = format,
+    verbose = 0, rsid_policy = rsid_policy, ...))
+}
+
+test_that("the 48 SNV combinations resolve as the design's table states", {
+  bases <- c("A", "C", "G", "T")
+  fr <- do.call(rbind, lapply(seq_along(bases), function(i)
+    data.frame(position = i, ref_vcf = bases[i], alt_vcf = setdiff(bases, bases[i]))))
+  cases <- expand.grid(r = seq_along(bases), a1 = bases, a2 = bases,
+                       stringsAsFactors = FALSE)
+  cases <- cases[cases$a1 != cases$a2, ]
+  pal <- GLOWr:::.favor_complement(cases$a1) == cases$a2
+  # The design's rule, written out independently of the classifier: the tier
+  # each case must get, and the REF-ALT of the row it must point at.
+  comp <- c(A = "T", C = "G", G = "C", T = "A")
+  rule <- function(r, a1, a2, method) {
+    if (a1 == r) return(c("exact", a1, a2))
+    if (method == "exact") return(c("unmatched_ref", NA, NA))
+    if (a2 == r) return(c("swapped", a2, a1))
+    if (comp[[a1]] == r) return(c("flipped", comp[[a1]], comp[[a2]]))
+    if (comp[[a2]] == r) return(c("flipped_swapped", comp[[a2]], comp[[a1]]))
+    c("unmatched_ref", NA, NA)
+  }
+  for (method in c("flexible", "exact")) {
+    cl <- GLOWr:::.favor_classify(cases$r, cases$a1, cases$a2, rep(TRUE, nrow(cases)),
+                                  fr$position, fr$ref_vcf, fr$alt_vcf, method)
+    want <- t(mapply(rule, bases[cases$r], cases$a1, cases$a2, MoreArgs = list(method = method)))
+    # Case by case: the tier, and the row's REF and ALT.
+    expect_equal(cl$tier, unname(want[, 1]), info = method)
+    got_ref <- ifelse(is.na(cl$row), NA, fr$ref_vcf[cl$row])
+    got_alt <- ifelse(is.na(cl$row), NA, fr$alt_vcf[cl$row])
+    expect_equal(got_ref, unname(want[, 2]), info = method)
+    expect_equal(got_alt, unname(want[, 3]), info = method)
+    # The totals of the design's table.
+    tab <- table(pal, factor(cl$tier, GLOWr:::.favor_tier_levels()))
+    if (method == "flexible") {
+      expect_equal(as.integer(tab["FALSE", c("exact", "swapped", "flipped", "flipped_swapped")]),
+                   c(8L, 8L, 8L, 8L))
+      expect_equal(as.integer(tab["TRUE", c("exact", "swapped", "unmatched_ref")]),
+                   c(4L, 4L, 8L))
+      expect_equal(sum(tab[, "unmatched_alt"]), 0L)   # unreachable at a complete position
+    } else {
+      expect_equal(sum(tab[, "exact"]), 12L)
+      expect_equal(sum(tab[, "unmatched_ref"]), 36L)
+    }
+  }
 })
 
-test_that("a zero-match chunk (header-only join output) is handled", {
-  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
-
-  db_dir <- withr::local_tempdir()
-  # Chunk 1 matches NOTHING in the input; chunk 2 matches one variant. The
-  # inner join then feeds a header-only file to `xsv cat rows`, the edge an
-  # xsv version bump is most likely to change.
-  writeLines(c("variant_vcf,cadd_phred", "22-77777-G-A,7.5"),
-             file.path(db_dir, "chr22_1.csv"))
-  writeLines(c("variant_vcf,cadd_phred", "22-300-T-G,30.5"),
-             file.path(db_dir, "chr22_2.csv"))
-
-  res <- GLOWr:::.join_favor_xsv(
-    variant_data = data.frame(VarInfo = c("22-300-T-G", "22-999-A-G"),
-                              stringsAsFactors = FALSE),
-    favor_db_path = db_dir,
-    chunks_needed = c("chr22_1.csv", "chr22_2.csv"),
-    features = "cadd_phred",
-    verbose = 0)
-
-  expect_equal(res$VarInfo, c("22-300-T-G", "22-999-A-G"))
-  expect_equal(res$cadd_phred, c(30.5, NA_real_))
+test_that("at a sparse position a transformation that finds the reference but no row is unmatched_alt", {
+  # Only A-G exists. Input T-G: REF as given is not the reference base A, the
+  # complement A-C is the reference orientation but no row carries A-C. The
+  # outcome names the alternate allele as the reason (unmatched_alt); under
+  # exact matching no transformation is enabled, so it is unmatched_ref.
+  cl <- GLOWr:::.favor_classify(1L, "T", "G", TRUE, 1L, "A", "G", "flexible")
+  expect_equal(cl$tier, "unmatched_alt")
+  cl <- GLOWr:::.favor_classify(1L, "T", "G", TRUE, 1L, "A", "G", "exact")
+  expect_equal(cl$tier, "unmatched_ref")
+  # C-G (palindromic, containing neither A nor its complement T): unmatched_ref.
+  cl <- GLOWr:::.favor_classify(1L, "C", "G", TRUE, 1L, "A", "G", "flexible")
+  expect_equal(cl$tier, "unmatched_ref")
 })
 
-test_that("xsv join failure on a chunk is fatal, not silent", {
-  if (!GLOWr:::.check_xsv_available()) skip("xsv not installed")
+test_that("a malformed position is refused rather than truncated", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  for (bad in c("22-101.9-A-C", "22-0-A-C", "22-1e3-A-C", "22-99999999999-A-C")) {
+    expect_error(annotate_favor(data.frame(VarInfo = c("22-1000-G-A", bad)), favor_db_path = db,
+                                features = .syn_feats(), use_xsv = FALSE, verbose = 0),
+                 "malformed position", info = bad)
+  }
+  # A key with the wrong number of parts is still an unsupported input, not an error.
+  res <- annotate_favor(data.frame(VarInfo = c("22-1000-G-A", "22-1000-G")), favor_db_path = db,
+                        features = .syn_feats(), use_xsv = FALSE, verbose = 0)
+  expect_equal(res$match_tier, c("exact", "unsupported_allele"))
+})
 
-  db_dir <- withr::local_tempdir()
-  # A chunk file WITHOUT the key column: xsv join exits nonzero.
-  writeLines(c("wrong_column,cadd_phred", "22-100-A-C,10.5"),
-             file.path(db_dir, "chr22_1.csv"))
+test_that("every outcome is recorded with its database key (CSV backend)", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  inp <- .syn_inputs()
+  for (method in c("flexible", "exact")) {
+    res <- .syn_annotate(db, method, "csv", use_xsv = FALSE)
+    expect_equal(res$VarInfo, inp$VarInfo)                      # identity and order kept
+    expect_equal(res$match_tier, inp[[method]], info = method)
+  }
+  res <- .syn_annotate(db, "flexible", "csv", use_xsv = FALSE)
+  expect_equal(res$favor_key, inp$key_flexible)
+  expect_equal(res$rsid_check, inp$rsid_check)
+  rows <- .syn_rows()
+  # A flipped variant stores its own row's value, not the mean of the position.
+  i <- which(inp$VarInfo == "22-1000-C-T")
+  expect_equal(res$cadd_phred[i], 1.25)
+  expect_equal(res$genecode_comprehensive_category[i], "exonic")
+  expect_equal(res$metasvm_pred[i], "D")
+  # A matched row whose features are all missing stays matched, not re-averaged.
+  j <- which(inp$VarInfo == "22-4000-T-A")
+  expect_equal(res$match_tier[j], "exact")
+  expect_true(is.na(res$cadd_phred[j]) && is.na(res$linsight[j]))
+  # Position-only average: numeric mean over the three SNV rows only (the indel
+  # row A-AT, cadd 9.5, is excluded; decision D10), string = first non-empty.
+  k <- which(inp$VarInfo == "22-2000-NA-NA")
+  expect_equal(res$cadd_phred[k], mean(c(4.125, 4.25, 4.375)))
+  expect_equal(res$linsight[k], 0.5)
+  expect_equal(res$genecode_comprehensive_category[k], "intronic")
+  # A position covered only by an indel row is uncovered for a position-only key,
+  # while the indel itself matches by its exact key.
+  expect_equal(res$match_tier[inp$VarInfo == "22-7000-NA-NA"], "uncovered")
+  expect_equal(res$match_tier[inp$VarInfo == "22-7000-A-AT"], "exact")
+  expect_equal(res$cadd_phred[inp$VarInfo == "22-7000-A-AT"], 10.5)
+  # Duplicates each receive the annotation; non-matches carry NA.
+  expect_equal(res$cadd_phred[inp$VarInfo == "22-1000-G-A"], c(1.25, 1.25))
+  expect_true(all(is.na(res$cadd_phred[res$match_tier %in%
+    c("unmatched_alt", "unmatched_ref", "uncovered", "no_database", "unsupported_allele")])))
+  # Features keep their type even when every value is missing.
+  expect_type(res$metasvm_pred, "character")
+  expect_type(res$cadd_phred, "double")
+})
 
-  expect_error(
-    GLOWr:::.join_favor_xsv(
-      variant_data = data.frame(VarInfo = "22-100-A-C", stringsAsFactors = FALSE),
-      favor_db_path = db_dir,
-      chunks_needed = "chr22_1.csv",
-      features = "cadd_phred",
-      verbose = 0),
-    "xsv join failed")
+test_that("the rsID check records the evidence, and rsid_policy = 'require' withholds unconfirmed transformed matches", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  inp <- .syn_inputs()
+  rec <- .syn_annotate(db, "flexible", "csv", use_xsv = FALSE)
+  req <- .syn_annotate(db, "flexible", "csv", use_xsv = FALSE, rsid_policy = "require")
+  # "record" keeps every match and records the check; "require" withholds the
+  # transformed matches checked differs or favor_none, and nothing else.
+  expect_equal(rec$match_tier, inp$flexible)
+  expect_equal(req$match_tier, inp$require)
+  expect_equal(req$rsid_check, inp$rsid_check)      # the check itself does not change
+  w <- which(req$match_tier == "rsid_conflict")
+  expect_equal(inp$VarInfo[w], c("22-1000-C-T", "22-1000-C-G"))
+  expect_equal(req$rsid_check[w], c("differs", "favor_none"))
+  # A withheld row carries no annotation, and favor_key names the withheld row.
+  for (f in .syn_feats()) expect_true(all(is.na(req[[f]][w])), info = f)
+  expect_equal(req$favor_key[w], rec$favor_key[w])
+  # Exact matches are never withheld, whatever the check; chip_none passes through.
+  e <- which(inp$VarInfo == "22-1000-g-a")
+  expect_equal(req$match_tier[e], "exact"); expect_equal(req$rsid_check[e], "differs")
+  e <- which(inp$VarInfo == "22-1000-T-C")
+  expect_equal(req$match_tier[e], "flipped_swapped"); expect_equal(req$rsid_check[e], "chip_none")
+  # Every kept value equals the "record" run's.
+  kept <- req$match_tier != "rsid_conflict"
+  for (f in .syn_feats()) expect_equal(req[[f]][kept], rec[[f]][kept], info = f)
+  # Non-matches and position-only keys carry no check.
+  expect_true(all(is.na(rec$rsid_check[rec$match_tier %in% c("position_only", "uncovered",
+    "unmatched_alt", "unmatched_ref", "no_database", "unsupported_allele")])))
+  # Without an rsID column every check is chip_none and "require" withholds nothing.
+  none <- suppressWarnings(annotate_favor(inp[, "VarInfo", drop = FALSE], db, features = .syn_feats(),
+                                          match_method = "flexible", rsid_policy = "require",
+                                          use_xsv = FALSE, verbose = 0))
+  expect_equal(none$match_tier, inp$flexible)
+  expect_true(all(none$rsid_check[!is.na(none$rsid_check)] == "chip_none"))
+  # Exact mode records the check too, and the rsID is never a lookup key: the
+  # input rs9999 at 22-1000-C-T is not found by its rsID.
+  ex <- .syn_annotate(db, "exact", "csv", use_xsv = FALSE)
+  expect_equal(ex$rsid_check[inp$VarInfo == "22-1000-G-A"], c("same", "same"))
+  expect_equal(ex$match_tier[inp$VarInfo == "22-1000-C-T"], "unmatched_ref")
+  # The check is made whether or not rsid is a requested feature.
+  expect_false("rsid" %in% names(rec))
+  # The summary message reports the policy and the counts.
+  expect_message(suppressWarnings(annotate_favor(inp[1:3, c("VarInfo", "rsID")], db,
+    features = .syn_feats(), match_method = "flexible", rsid_policy = "require",
+    use_xsv = FALSE, verbose = 1)), "rsID check \\(policy require, source rsID column\\): same=2, differs=1")
+})
+
+test_that("the xsv position join returns the same rows as the fread path", {
+  skip_if_not(GLOWr:::.check_xsv_available(), "xsv not installed")
+  db <- .syn_csv_db(withr::local_tempdir())
+  a <- .syn_annotate(db, "flexible", "csv", use_xsv = FALSE)
+  b <- .syn_annotate(db, "flexible", "csv", use_xsv = TRUE)
+  expect_identical(b, a)
+  # Both chunks contribute: rows at 1000 (chunk 1) and 5000 (chunk 2) resolve.
+  expect_false(is.na(b$cadd_phred[b$VarInfo == "22-5000-CAT-C"]))
+})
+
+test_that("the Parquet backend returns what the CSV backend returns (G1, synthetic)", {
+  skip_if_not_installed("arrow")
+  csv_db <- .syn_csv_db(withr::local_tempdir())
+  pq_db  <- .syn_parquet_db(withr::local_tempdir())
+  for (method in c("flexible", "exact")) {
+    a <- .syn_annotate(csv_db, method, "csv", use_xsv = FALSE)
+    b <- .syn_annotate(pq_db, method, "parquet")
+    expect_identical(b$match_tier, a$match_tier, info = method)
+    expect_identical(b$favor_key, a$favor_key, info = method)
+    expect_identical(b$rsid_check, a$rsid_check, info = method)
+    for (f in .syn_feats()) expect_identical(b[[f]], a[[f]], info = paste(method, f))
+  }
+  # The rsID policy acts the same on both backends (the Parquet rsID is dbsnp.rsid).
+  a <- .syn_annotate(csv_db, "flexible", "csv", use_xsv = FALSE, rsid_policy = "require")
+  b <- .syn_annotate(pq_db, "flexible", "parquet", rsid_policy = "require")
+  expect_identical(b$match_tier, a$match_tier)
+  expect_identical(b$match_tier, .syn_inputs()$require)
+  # Auto-detection picks each backend, and a mixed directory is refused.
+  expect_identical(.syn_annotate(pq_db, "flexible", "auto")$match_tier,
+                   .syn_inputs()$flexible)
+  file.copy(file.path(csv_db, "chr22_1.csv"), pq_db)
+  expect_error(.syn_annotate(pq_db, "flexible", "auto"), "both Parquet and CSV")
+})
+
+test_that("a chromosome without a database is 'no_database', with a warning", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  expect_warning(
+    res <- annotate_favor(data.frame(VarInfo = c("23-100-A-G", "22-1000-G-A")),
+                          favor_db_path = db, features = .syn_feats(), verbose = 0),
+    "no data for chromosome 23")
+  expect_equal(res$match_tier, c("no_database", "exact"))
+})
+
+test_that("a missing chunk file, or one without the key columns, is fatal", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  unlink(file.path(db, "chr22_2.csv"))
+  expect_error(annotate_favor(data.frame(VarInfo = "22-5000-C-A"), favor_db_path = db,
+                              features = .syn_feats(), verbose = 0),
+               "chunk file not found")
+  writeLines(c("variant_vcf,cadd_phred", "22-5000-C-A,1"), file.path(db, "chr22_2.csv"))
+  expect_error(annotate_favor(data.frame(VarInfo = "22-5000-C-A"), favor_db_path = db,
+                              features = .syn_feats(), verbose = 0),
+               "lacks position")
+})
+
+test_that("na_allele_method = 'first' takes every feature from the first row", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  res <- annotate_favor(data.frame(VarInfo = "22-1000-NA-NA"), favor_db_path = db,
+                        features = .syn_feats(), na_allele_method = "first",
+                        use_xsv = FALSE, verbose = 0)
+  expect_equal(res$match_tier, "position_only")
+  expect_equal(res$cadd_phred, 1.25)
+  expect_equal(res$metasvm_pred, "D")
+})
+
+test_that("na_handling acts on features only and never changes the outcome", {
+  db <- .syn_csv_db(withr::local_tempdir())
+  inp <- data.frame(VarInfo = c("22-1000-G-A", "22-6000-A-G"))
+  z <- annotate_favor(inp, favor_db_path = db, features = .syn_feats(),
+                      na_handling = "zero", use_xsv = FALSE, verbose = 0)
+  expect_equal(z$match_tier, c("exact", "uncovered"))
+  expect_equal(z$cadd_phred, c(1.25, 0))
+  expect_true(is.na(z$genecode_comprehensive_category[2]))  # strings keep NA
+  d <- annotate_favor(inp, favor_db_path = db, features = .syn_feats(),
+                      na_handling = "drop", use_xsv = FALSE, verbose = 0)
+  expect_equal(d$VarInfo, "22-1000-G-A")
+})
+
+test_that("the nested FAVOR 2.0 fields serialize into the v1 layouts", {
+  fr <- data.frame(position = 1:3)
+  fr$.gh_id <- c("GH22I017115", NA, "GH22I000001")
+  fr$.gh_score <- c(0.72, NA, 1.2)
+  fr$.gh_targets <- list(data.frame(gene = c("TMEM121B", "IL17RA"), score = c(12.18, 3)),
+                         NULL, data.frame(gene = character(0), score = numeric(0)))
+  fr$.gei_tx <- list(
+    data.frame(gene = c("CECR2", "CECR2"), transcript_id = c("ENST1.6", "ENST2.1"),
+               location = c("exon8", "exon8"), hgvsc = c("c.G389A", "c.G812A"),
+               hgvsp = c("p.R130H", "p.R271H")),
+    data.frame(gene = "UNKNOWN", transcript_id = "", location = "", hgvsc = NA, hgvsp = ""),
+    NULL)
+  fr$.gi_genes <- list(c("ENST00000651146.1:c.*975C>T", "ENST00000465611.1:c.*2092C>T)", "GAB4"),
+                       c("TCN2", "PES1"), character(0))
+  s <- GLOWr:::.favor2_serialize(fr, 1:3, c("genehancer", "genecode_comprehensive_exonic_info",
+                                            "genecode_comprehensive_info"))
+  expect_equal(s$genehancer, c(
+    "Name=0.72;genehancer_id=GH22I017115;connected_gene=TMEM121B;score=12.18;connected_gene=IL17RA;score=3.00",
+    NA, "Name=1.20;genehancer_id=GH22I000001"))
+  expect_equal(s$genecode_comprehensive_exonic_info, c(
+    "CECR2:ENST1.6:exon8:c.G389A:p.R130H,CECR2:ENST2.1:exon8:c.G812A:p.R271H,",
+    "UNKNOWN", NA))
+  expect_equal(s$genecode_comprehensive_info, c("GAB4", "TCN2,PES1", NA))
+  # STAARpipeline's enhancer masks read the first connected gene this way.
+  expect_equal(strsplit(strsplit(s$genehancer[1], "=")[[1]][4], ";")[[1]][1], "TMEM121B")
+})
+
+test_that("a FAVOR 2.0 file lacking a requested feature's leaves skips that feature", {
+  skip_if_not_installed("arrow")
+  db <- .syn_parquet_db(withr::local_tempdir(), drop = "linsight")
+  inp <- .syn_inputs()
+  expect_message(
+    res <- suppressWarnings(annotate_favor(inp[, "VarInfo", drop = FALSE], favor_db_path = db,
+                          features = .syn_feats(), favor_db_format = "parquet",
+                          match_method = "flexible", verbose = 1)),
+    "lacks the columns of linsight")
+  expect_false("linsight" %in% names(res))
+  expect_equal(res$match_tier, inp$flexible)            # matching is unaffected
+  expect_equal(res$cadd_phred[inp$VarInfo == "22-1000-C-T"], 1.25)
+  # The key columns stay mandatory.
+  db2 <- withr::local_tempdir()
+  arrow::write_parquet(arrow::arrow_table(position = 1:2, ref_vcf = c("A", "C")),
+                       file.path(db2, "chromosome_22.parquet"))
+  expect_error(annotate_favor(inp[1, "VarInfo", drop = FALSE], favor_db_path = db2,
+                              features = .syn_feats(), favor_db_format = "parquet", verbose = 0),
+               "lacks the key columns")
+})
+
+test_that("the xsv path accepts a database directory whose path contains spaces", {
+  skip_if_not(GLOWr:::.check_xsv_available(), "xsv not available")
+  db <- file.path(withr::local_tempdir(), "favor db with spaces")
+  dir.create(db)
+  .syn_csv_db(db)
+  inp <- .syn_inputs()
+  a <- .syn_annotate(db, "flexible", "csv", use_xsv = TRUE)
+  b <- .syn_annotate(db, "flexible", "csv", use_xsv = FALSE)
+  expect_equal(a$match_tier, inp$flexible)
+  expect_equal(a, b)
+})
+
+test_that("the backend is resolved from the directory or refused", {
+  d <- withr::local_tempdir()
+  expect_error(GLOWr:::.favor_resolve_backend(d, "auto"), "No FAVOR database files")
+  file.create(file.path(d, "chr1_1.csv"))
+  expect_equal(GLOWr:::.favor_resolve_backend(d, "auto"), "csv")
+  expect_equal(GLOWr:::.favor_resolve_backend(d, "parquet"), "parquet")
 })

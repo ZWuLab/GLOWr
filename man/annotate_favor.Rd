@@ -17,38 +17,46 @@ annotate_favor(
   na_allele_method = "average",
   na_handling = "keep",
   use_xsv = TRUE,
-  verbose = 1
+  verbose = 1,
+  favor_db_format = c("auto", "csv", "parquet"),
+  favor_release = NULL,
+  rsid_policy = c("require", "record")
 )
 }
 \arguments{
 \item{variants}{One of the following:
 \itemize{
-\item A data.frame with VarInfo column (CHR-POS-REF-ALT format)
+\item A data.frame with VarInfo column (CHR-POS-REF-ALT format), and
+optionally an \code{rsID} column (the input's rsID per row), which
+feeds the rsID check described in Details
 \item An S3 object of class \code{glow_pi_case_data} or
 \code{glow_pi_control_data} from \code{\link{prepare_PI_case_data}} or
 \code{\link{prepare_PI_control_data}}
 \item A path (character) to a GDS file containing variant data (requires
-SeqArray package). Variants are extracted automatically.
+SeqArray package). Variants are extracted automatically, and the
+GDS \code{annotation/id} (the rsID on a chip cohort) is read as the
+\code{rsID} column.
 }}
 
-\item{favor_db_path}{Character. Path to directory containing FAVOR CSV chunk
-files (e.g., chr1_1.csv, chr1_2.csv, etc.)}
+\item{favor_db_path}{Character. The database directory: either the FAVOR v1
+CSV chunk files (\code{chr1_1.csv}, \code{chr1_2.csv}, ...) or the FAVOR 2.0
+Parquet files (\code{chromosome_1.parquet}, ...).}
 
-\item{favor_split_file}{Character or NULL. Path to \code{FAVORdatabase_chrsplit.csv}
-file that maps positions to chunk files. If NULL (default), searches in
-this order: (1) \code{favor_db_path}, (2) package bundled file. The bundled
-file ensures the function works even if the split file is not present in
-the FAVOR database directory}
+\item{favor_split_file}{Character or NULL. CSV backend only. Path to
+\code{FAVORdatabase_chrsplit.csv}, which maps positions to chunk files. If
+NULL (default), searches in this order: (1) \code{favor_db_path}, (2) the
+package's bundled file.}
 
-\item{features}{Character vector. FAVOR feature column names to extract.
-The default is the complete annotation content of the FAVOR Essential
-Database (30 columns): 20 numeric scores (17 annotation principal
-components, CADD PHRED, LINSIGHT, FATHMM-XF) plus 10 categorical fields
-(GENCODE category/info and exonic category/info, MetaSVM prediction,
-GeneHancer, CAGE, rDHS, rsID). The categorical fields are what the
-built-in coding masks read, so an aGDS built with the default is directly
-scannable by every built-in variant category. Pass a subset to shrink the
-aGDS; features absent from the FAVOR source are skipped with a warning.}
+\item{features}{Character vector. Annotation fields to extract, named as the
+FAVOR v1 columns. The default is the complete annotation content of the
+FAVOR Essential Database (30 fields): 20 numeric scores (17 annotation
+principal components, CADD PHRED, LINSIGHT, FATHMM-XF) plus 10 categorical
+fields (GENCODE category/info and exonic category/info, MetaSVM prediction,
+GeneHancer, CAGE, rDHS, rsID). The categorical fields are what the built-in
+coding masks read, so an aGDS built with the default is directly scannable
+by every built-in variant category. Fields the database does not carry are
+skipped and reported (FAVOR 2.0 lacks four older APC versions, so the
+default yields 26 fields there).}
 
 \item{output_csv}{Character or NULL. If provided, saves annotated results
 to CSV file at this path}
@@ -73,202 +81,192 @@ IDs (GDS input only)
 Default is NULL (use all variants). For non-GDS input, chromosome and
 position are parsed from the VarInfo column.}
 
-\item{match_method}{Character. Matching strategy for variants:
+\item{match_method}{Character. How allele-bearing variants are matched:
 \itemize{
-\item "exact" (default): Exact VarInfo match only (fast, STAAR-compatible)
-\item "flexible": Hierarchical matching for strand flips and multiallelic
-variants. Priority order: (1) exact match, (2) same REF/different ALT,
-(3) swapped alleles, (4) swapped REF match, (5) position average
+\item "exact" (default): the key as given only (STAAR-compatible)
+\item "flexible": for SNVs, the lookup key is also normalized against
+FAVOR's reference base by swapping REF and ALT or complementing both
+alleles, for cohorts whose alleles may differ from the reference in
+order or strand (genotyping-chip data). Indels always match by the
+exact key. See Details.
 }}
 
-\item{na_allele_method}{Character. How to handle variants with NA alleles
-(CHR-POS-NA-NA format) when multiple FAVOR entries match by position:
+\item{na_allele_method}{Character. How position-only keys
+(CHR-POS-NA-NA) are annotated from the SNV rows at the position (indel
+rows are never included; a position with no SNV row is "uncovered"):
 \itemize{
-\item "average" (default): Average all numeric annotation columns
-\item "first": Keep first matching entry
+\item "average" (default): numeric features averaged over the SNV rows'
+non-missing values, string features take the first non-empty value
+\item "first": every feature from the first SNV row at the position
 }}
 
-\item{na_handling}{Character. How to handle missing annotation values:
+\item{na_handling}{Character. How to handle missing annotation values
+after matching (never changes \code{match_tier}):
 \itemize{
 \item "keep" (default): Keep NA values as-is
-\item "zero": Replace NA with 0
-\item "drop": Remove variants with any NA annotations
+\item "zero": Replace NA with 0 in numeric features
+\item "drop": Remove variants with any NA annotations from the
+returned table and the CSV. The aGDS writers keep every variant of
+the GDS (the file stays a copy of the cohort) and leave the dropped
+variants' annotation and tier entries empty.
 }}
 
-\item{use_xsv}{Logical. If TRUE (default) and xsv CLI tool is available,
-use xsv for faster CSV joining (auto-falls back to R if unavailable)}
+\item{use_xsv}{Logical. CSV backend only. If TRUE (default) and the xsv CLI
+tool is available, xsv fetches the database rows at the input positions
+(a streaming join on \code{position}); otherwise each chunk is read with
+\code{data.table::fread()} and filtered. Both give the same rows.}
 
 \item{verbose}{Integer. Verbosity level: 0=silent, 1=messages (default),
 2=detailed messages}
+
+\item{favor_db_format}{Character. "auto" (default), "csv" or "parquet".
+Under "auto" the format is detected from the files in
+\code{favor_db_path}; a directory holding both kinds, or neither, is an
+error. (Placed after \code{verbose} so that positional calls written for
+GLOWr 0.1.1 keep their meaning.)}
+
+\item{favor_release}{Character or NULL. The FAVOR release the database
+files come from, recorded in the aGDS provenance. NULL records "unknown".}
+
+\item{rsid_policy}{Character. What the rsID check does with a match:
+\itemize{
+\item "require" (default): a \code{swapped}, \code{flipped} or
+\code{flipped_swapped} match whose check is \code{differs} or
+\code{favor_none} is withheld as the non-match \code{rsid_conflict}
+(its annotation stays missing; \code{favor_key} names the withheld
+row). Exact matches and matches checked \code{chip_none} are kept,
+so exact matching is unaffected and an input without rsIDs loses
+nothing.
+\item "record": every match is kept and the check is only recorded
+in \code{rsid_check}, for diagnostics.
+}}
 }
 \value{
-data.frame with VarInfo column and annotation feature columns.
-Order of variants is preserved from input.
+data.frame with the input columns (for GDS input also
+\code{variant_id} and \code{rsID}), one column per served feature,
+\code{match_tier} (the matching outcome of each row), \code{favor_key}
+(the \code{variant_vcf} of the database row that supplied the
+annotation, or of the row withheld under \code{rsid_conflict}; NA
+otherwise) and \code{rsid_check} (the rsID evidence of every matched
+row; NA for non-matches and position-only keys). Order of variants is
+preserved from input.
 }
 \description{
 Annotates variants with functional annotation scores from the FAVOR
-(Functional Annotation of Variants Online Resource) database. This function
-is used in PI estimation to retrieve pathogenicity-relevant features for
-trait-associated and control variants.
+(Functional Annotation of Variants Online Resource) database, read either
+from the FAVOR v1 CSV chunk files or from the FAVOR 2.0 per-chromosome
+Parquet files. Every input row receives a matching outcome
+(\code{match_tier}), when matched the key of the database row that
+supplied its annotation (\code{favor_key}), and the rsID evidence for that
+row (\code{rsid_check}). Used in PI estimation to retrieve
+pathogenicity-relevant features for trait-associated and control variants,
+and to build the cohort aGDS that GLOW and STAAR scan.
 }
 \details{
-\strong{FAVOR Database Structure:}
-
-The FAVOR database stores functional annotations for all possible variants
-in the human genome, split into chromosome-specific chunks for efficient access:
+\strong{Database formats:}
 \itemize{
-\item FAVORdatabase_chrsplit.csv: Maps genomic positions to chunk file numbers.
-A copy is bundled with GLOWr for convenience (used if not found in
-\code{favor_db_path})
-\item chr{N}_{K}.csv: Chunk files with annotations (variant_vcf key column)
-\item variant_vcf format: "CHR-POS-REF-ALT" (e.g., "1-12345-A-G")
+\item FAVOR v1 CSV: \code{chr{N}_{K}.csv} chunk files keyed by
+\code{variant_vcf} ("CHR-POS-REF-ALT"), with
+\code{FAVORdatabase_chrsplit.csv} mapping positions to chunks (a copy is
+bundled with GLOWr).
+\item FAVOR 2.0 Parquet: \code{chromosome_{N}.parquet}, one file per
+chromosome (1-22, X, Y), sorted by position, with the annotation in
+nested struct columns, read leaf by leaf one row group at a time.
+Requires the \pkg{arrow} package. The map from our field names to the Parquet sources is
+internal (\code{.favor2_field_map()}); GeneHancer, GENCODE exonic
+information and GENCODE information are serialized into the v1 string
+layouts. FAVOR 2.0 stores scores as float32, which R reads as the exact
+double value of the float32.
 }
+The users obtain the database from the FAVOR team; GLOWr does not
+redistribute it.
 
-\strong{Annotation Process:}
-
+\strong{Matching (the lookup key is normalized, never the data):}
+Each input row is classified as an SNV (REF and ALT each one of A, C, G, T),
+an indel (A/C/G/T strings, not both of length one), a position-only key
+(both alleles "NA"), or unsupported (anything else, including symbolic
+alleles and multiallelic records). For an SNV at position p with FAVOR
+reference base r:
 \enumerate{
-\item Parse VarInfo to extract CHR and POS
-\item Use split file to identify relevant FAVOR chunks
-\item Load chunks and join by VarInfo (exact match)
-\item Handle NA alleles: match by CHR-POS if VarInfo has NA-NA suffix
-\item Apply NA handling strategy (keep/zero/drop)
-\item Write to CSV and/or aGDS if requested
+\item "exact": the key CHR-POS-REF-ALT exists.
+\item "swapped" (flexible): r equals ALT and CHR-POS-ALT-REF exists.
+\item "flipped" / "flipped_swapped" (flexible): r equals the complement
+of REF (or of ALT) and the complemented key exists.
 }
+Indels match by the exact key only, because a VCF indel's REF is the genome
+sequence and its reciprocal key names a different variant. Non-matches carry
+a reason: "unmatched_alt" (the position is covered and the reference base
+is found, either by REF as given or, under flexible matching, after one of
+the enabled transformations, but no row carries the resulting REF-ALT pair),
+"unmatched_ref" (the position is covered, REF as given does not agree with
+r, and no enabled transformation finds r), "uncovered" (no database row at the position),
+"no_database" (the database has no file or chunk for the chromosome),
+"unsupported_allele" and "rsid_conflict" (below). Position-only keys get
+"position_only", with the features aggregated over the SNV rows at the
+position only (\code{na_allele_method}); a position that carries no SNV row
+is "uncovered". A tier records
+the lookup transformation, not a verified strand: a non-palindromic SNV pair
+at a covered position always resolves through the first four tiers,
+including a pair of two non-reference alleles. The cohort's own alleles,
+genotypes and keys are never modified.
 
-\strong{Position-Only Matching (NA Alleles):}
+\strong{The rsID as evidence, never a key.} FAVOR carries dbSNP's rsID on
+the row of the substitution dbSNP lists, and the other rows at the position
+carry none, so agreement between the input's rsID and the matched row's
+confirms the site and the allele pair. For every
+matched row \code{rsid_check} records "same", "differs", "chip_none" (the
+input carries no rsID of the form \code{rs<digits>}) or "favor_none" (the
+database row carries none). The input's rsID is the GDS \code{annotation/id}
+or the data.frame's \code{rsID} column; without either, every check is
+"chip_none". Under \code{rsid_policy = "require"}, the default, a
+transformed match checked "differs" or "favor_none" becomes
+"rsid_conflict"; \code{"record"} keeps it. The check reads
+the database's rsID column whether or not \code{rsid} is a requested
+feature.
 
-Literature-curated variant lists often lack REF/ALT information, resulting
-in VarInfo like "1-12345-NA-NA". For these variants:
-\itemize{
-\item Match by CHR and POS only (ignoring alleles)
-\item If multiple FAVOR entries at same position:
-\itemize{
-\item "average": Average numeric columns (more robust for multi-allelic)
-\item "first": Keep first match (faster, less comprehensive)
-}
-\item Warning emitted showing count of affected variants
-}
+\strong{Outputs:} the aGDS writers align rows to the GDS through
+\code{variant.id}, write one native-typed sub-node per feature under
+\code{annotation/info/FunctionalAnnotation}, the matching outcome as
+\code{annotation/info/favor_match_tier}, the rsID check as
+\code{annotation/info/favor_rsid_check}, and provenance (database format,
+files, sizes and SHA-256 when a \code{SHA256SUMS} file is present, release,
+GLOWr version, matching settings, the rsID policy and source, the rows the
+position-only aggregation uses, outcome and check counts, date) as
+attributes of the \code{FunctionalAnnotation} folder.
 
-\strong{Default 11 FAVOR Features:}
-
-The default feature set balances comprehensiveness with computational
-efficiency, covering conservation, protein function, epigenetics,
-mappability, and variant effect prediction:
-\enumerate{
-\item apc_conservation: Conservation scores
-\item apc_protein_function_v3: Protein functional impact (version 3)
-\item apc_epigenetics_active: Active chromatin marks
-\item apc_epigenetics_repressed: Repressed chromatin marks
-\item apc_epigenetics_transcription: Transcription-related marks
-\item apc_local_nucleotide_diversity: Local sequence diversity
-\item apc_mappability: Read mappability
-\item apc_transcription_factor: TF binding sites
-\item cadd_phred: CADD deleteriousness score
-\item linsight: Conservation fitness score
-\item fathmm_xf: Pathogenicity prediction
-}
-
-\strong{Performance Optimization:}
-
-For large variant sets, the function uses several optimization strategies:
-\itemize{
-\item Only loads FAVOR chunks containing relevant positions
-\item Uses data.table for efficient CSV reading and joining
-\item Optional xsv CLI tool for faster joins
-\item Only extracts requested feature columns
-}
-
-\strong{Computational Complexity:}
-
-O(n log m) where n = number of variants, m = FAVOR entries per chunk.
-Dominant operations: chunk loading O(k x m), joining O(n log m) per chunk,
-where k = number of chunks accessed.
+\strong{Computational Complexity:} the matching is vectorized and linear in
+the number of input rows plus the number of database rows at their
+positions. Reading dominates: the CSV backend streams each chunk that covers
+the input positions; the Parquet backend reads the position column of every
+row group and the requested leaf columns of the groups that hold input
+positions, one group at a time.
 }
 \examples{
 \dontrun{
-# Example 1: Annotate control variants (complete VarInfo)
-controls <- prepare_PI_control_data(
-  source = "data/reference_panel.gds",
-  n_controls = 500
-)
-annotated_controls <- annotate_favor(
-  variants = controls,
-  favor_db_path = "data/FAVOR"
+# Annotate a chip cohort's GDS from FAVOR 2.0, normalizing the lookup key for
+# allele order and strand, and withholding transformed matches that the
+# chip's rsID does not confirm
+annotate_favor(
+  variants = "data/chr22.gds",
+  favor_db_path = "data/favor2-db/FAVOR2.0",
+  match_method = "flexible",
+  rsid_policy = "require",
+  output_agds = "results/chr22_favor2.gds"
 )
 
-# Example 2: Annotate case variants (may have NA alleles)
-cases <- prepare_PI_case_data(
-  data = "ALS_known_variants.xlsx",
-  exclude_authors = "Nicolas A"
-)
+# Annotate case variants given by position only, from FAVOR v1 CSV
 annotated_cases <- annotate_favor(
   variants = cases,
   favor_db_path = "data/FAVOR",
-  na_allele_method = "average",  # Average multi-allelic matches
-  verbose = 2
+  na_allele_method = "average"
 )
+table(annotated_cases$match_tier)
 
-# Example 3: Custom feature subset
-annotated <- annotate_favor(
-  variants = my_variants_df,
-  favor_db_path = "data/FAVOR",
-  features = c("apc_conservation", "cadd_phred", "linsight"),
-  verbose = 1
-)
-
-# Example 4: Save to CSV and aGDS
-annotated <- annotate_favor(
-  variants = cases,
-  favor_db_path = "data/FAVOR",
-  output_csv = "results/annotated_cases.csv",
-  output_agds = "results/annotated_cases.agds"
-)
-
-# Example 5: Handle missing annotations by dropping
-annotated <- annotate_favor(
-  variants = variants,
-  favor_db_path = "data/FAVOR",
-  na_handling = "drop",  # Remove variants with any NA
-  verbose = 1
-)
-
-# Example 6: Annotate variants from a GDS file
+# GDS input with a position range filter
 annotated <- annotate_favor(
   variants = "data/genotypes.gds",
   favor_db_path = "data/FAVOR",
-  verbose = 1
-)
-
-# Example 7: GDS input with variant filter (chromosome 21 only)
-annotated <- annotate_favor(
-  variants = "data/genotypes.gds",
-  favor_db_path = "data/FAVOR",
-  variant_filter = list(chr = "21"),
-  verbose = 1
-)
-
-# Example 8: GDS input with position range filter
-annotated <- annotate_favor(
-  variants = "data/genotypes.gds",
-  favor_db_path = "data/FAVOR",
-  variant_filter = list(chr = "21", start = 1e6, end = 5e6),
-  verbose = 1
-)
-
-# Example 9: Update GDS file in-place with annotations (convert to aGDS)
-annotated <- annotate_favor(
-  variants = "data/genotypes.gds",
-  favor_db_path = "data/FAVOR",
-  update_gds = TRUE,  # Write annotations back to input GDS
-  verbose = 1
-)
-
-# Example 10: Filter data.frame input by chromosome
-annotated <- annotate_favor(
-  variants = my_variants_df,  # data.frame with VarInfo column
-  favor_db_path = "data/FAVOR",
-  variant_filter = list(chr = "21"),  # Only annotate chr21 variants
-  verbose = 1
+  variant_filter = list(chr = "21", start = 1e6, end = 5e6)
 )
 }
 
@@ -277,6 +275,10 @@ annotated <- annotate_favor(
 Zhou, H., Arapoglou, T., Li, X., et al. (2023). FAVOR: functional annotation of
 variants online resource and annotator for variation across the human genome.
 Nucleic Acids Research, 51(D1), D1300-D1311. doi:10.1093/nar/gkac966
+
+Zhou, H., Verma, V., Li, X., et al. (2026). FAVOR 2.0: A reengineered
+functional annotation of variants online resource for interpreting genomic
+variation. Nucleic Acids Research, 54(D1), D1405-D1414. doi:10.1093/nar/gkaf1217
 }
 \seealso{
 \code{\link{prepare_PI_case_data}} for case variant preparation

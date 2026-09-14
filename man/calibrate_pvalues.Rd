@@ -68,7 +68,7 @@ conventionally one-sided: a factor \eqn{f > 1} (inflation) is corrected, while
 alone -- dividing by \eqn{f < 1} would scale every statistic \emph{up} and can
 manufacture significance. The METAL meta-analysis software has enforced this
 since 2008: "a genomic control correction is only applied to studies where the
-genomic control parameter lambda > 1.0" (METAL ChangeLog, 2008-07-01, where
+genomic control parameter lambda > 1.0" (METAL ChangeLog entry of 1 July 2008, where
 correcting deflated studies is recorded as a fixed bug; Willer et al. 2010).
 Set \code{inflation_only = TRUE} to reproduce that convention. The default
 \code{FALSE} keeps the two-sided rescaling, which applies the factor in both
@@ -91,7 +91,7 @@ confounding from polygenicity in GWAS. \emph{Nat Genet} 47:291.
 
 Willer C.J., Li Y., Abecasis G.R. (2010). METAL: fast and efficient
 meta-analysis of genomewide association scans. \emph{Bioinformatics}
-26(17):2190-2191. (One-sided convention: its ChangeLog of 2008-07-01,
+26(17):2190-2191. (One-sided convention: its ChangeLog entry of 1 July 2008,
 \url{https://github.com/statgen/METAL/blob/master/ChangeLog}.)
 }
 \seealso{

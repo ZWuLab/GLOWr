@@ -55,6 +55,7 @@ skip_if_no_gds_tools <- function() {
     snp.id = seq_len(n_variants),
     snp.chromosome = rep(as.integer(chr), n_variants),
     snp.position = positions,
+    snp.rs.id = sprintf("rs%d", 1000L + seq_len(n_variants)),   # -> annotation/id
     snp.allele = rep("A/G", n_variants),
     snpfirstdim = TRUE
   )
@@ -416,4 +417,137 @@ test_that("string annotations survive flexible matching (type-aware aggregation)
   expect_true(any(nzchar(cat_vals)))
   expect_equal(as.character(cat_vals),
                fb$favor$genecode_comprehensive_exonic_category)
+})
+
+
+# ------------------------------------------------------------------------------
+# TEST: the corrected matcher through the aGDS writer (gate G2 of plan 11)
+# ------------------------------------------------------------------------------
+
+test_that("flexible matching writes each variant's own row and the tier node, aligned to the GDS", {
+  skip_if_no_gds_tools()
+
+  gds_path <- tempfile(fileext = ".gds")
+  on.exit(unlink(gds_path), add = TRUE)
+  gf <- .build_tiny_gds(gds_path, n_variants = 6L)
+
+  # FAVOR's REF at each position: the GDS REF for variants 1-2 (exact), the GDS
+  # ALT for 3-4 (swapped), the complement of the GDS REF for 5-6 (flipped). Each
+  # position carries the three SNV rows of its REF, each with its own CADD value.
+  comp <- c(A = "T", C = "G", G = "C", T = "A")
+  fref <- unname(c(gf$ref[1:2], gf$alt[3:4], comp[gf$ref[5:6]]))
+  rows <- do.call(rbind, lapply(seq_along(gf$pos), function(i) {
+    alts <- setdiff(c("A", "C", "G", "T"), fref[i])
+    data.frame(chromosome = gf$chr[i], position = gf$pos[i], ref_vcf = fref[i],
+               alt_vcf = alts, cadd_phred = i * 10 + seq_along(alts),
+               stringsAsFactors = FALSE)
+  }))
+  rows$variant_vcf <- paste(rows$chromosome, rows$position, rows$ref_vcf, rows$alt_vcf, sep = "-")
+  favor_dir <- tempfile("favordb_"); dir.create(favor_dir)
+  on.exit(unlink(favor_dir, recursive = TRUE), add = TRUE)
+  data.table::fwrite(rows, file.path(favor_dir, "chr22_1.csv"))
+  data.table::fwrite(data.frame(Chr = 22L, File_No = 1L, Start_Pos = 1L, End_Pos = 1e7),
+                     file.path(favor_dir, "FAVORdatabase_chrsplit.csv"))
+
+  out_agds <- tempfile(fileext = ".gds")
+  on.exit(unlink(out_agds), add = TRUE)
+  # rsid_policy = "record": this test checks the lookup alone (the database rows
+  # carry no rsID, so the package default "require" would withhold the
+  # transformed matches; the policy is tested below).
+  res <- annotate_favor(gds_path, favor_dir, features = "cadd_phred",
+                        match_method = "flexible", rsid_policy = "record",
+                        output_agds = out_agds, verbose = 0)
+
+  expect_equal(res$match_tier, c("exact", "exact", "swapped", "swapped", "flipped", "flipped"))
+  # The expected value is the row of the normalized key, never a position mean.
+  norm_alt <- unname(c(gf$alt[1:2], gf$ref[3:4], comp[gf$alt[5:6]]))
+  expected <- rows$cadd_phred[match(paste(gf$chr, gf$pos, fref, norm_alt, sep = "-"),
+                                    rows$variant_vcf)]
+  expect_equal(res$cadd_phred, expected)
+
+  g <- SeqArray::seqOpen(out_agds)
+  on.exit(SeqArray::seqClose(g), add = TRUE)
+  expect_equal(SeqArray::seqGetData(g, "annotation/info/favor_match_tier"), res$match_tier)
+  expect_equal(as.numeric(SeqArray::seqGetData(g, "annotation/info/FunctionalAnnotation/cadd_phred")),
+               expected)
+  # The copy's alleles are the input's, untouched by the normalization.
+  expect_equal(SeqArray::seqGetData(g, "$ref"), gf$ref)
+  expect_equal(SeqArray::seqGetData(g, "$alt"), gf$alt)
+  # Provenance is readable from the FunctionalAnnotation folder.
+  at <- gdsfmt::get.attr.gdsn(gdsfmt::index.gdsn(g, "annotation/info/FunctionalAnnotation"))
+  expect_equal(at$favor_match_method, "flexible")
+  expect_equal(at$favor_release, "unknown")
+})
+
+
+# ------------------------------------------------------------------------------
+# TEST: the rsID check through the aGDS writer (decision D9 of plan 11)
+# ------------------------------------------------------------------------------
+
+test_that("the rsID check is written to the aGDS, and rsid_policy = 'require' withholds a transformed match the chip's rsID does not confirm", {
+  skip_if_no_gds_tools()
+
+  gds_path <- tempfile(fileext = ".gds")
+  on.exit(unlink(gds_path), add = TRUE)
+  gf <- .build_tiny_gds(gds_path, n_variants = 6L)
+  g0 <- SeqArray::seqOpen(gds_path)
+  chip_rs <- SeqArray::seqGetData(g0, "annotation/id")
+  SeqArray::seqClose(g0)
+  expect_equal(chip_rs, sprintf("rs%d", 1001:1006))   # the chip's rsIDs are in the GDS
+
+  # As in the previous test: variants 1-2 exact, 3-4 swapped, 5-6 flipped. FAVOR
+  # carries the chip's rsID on the normalized row of variants 1-5 and a different
+  # rsID on the normalized row of variant 6, none elsewhere (as dbSNP does).
+  comp <- c(A = "T", C = "G", G = "C", T = "A")
+  fref <- unname(c(gf$ref[1:2], gf$alt[3:4], comp[gf$ref[5:6]]))
+  norm_alt <- unname(c(gf$alt[1:2], gf$ref[3:4], comp[gf$alt[5:6]]))
+  rows <- do.call(rbind, lapply(seq_along(gf$pos), function(i) {
+    alts <- setdiff(c("A", "C", "G", "T"), fref[i])
+    data.frame(chromosome = gf$chr[i], position = gf$pos[i], ref_vcf = fref[i],
+               alt_vcf = alts, cadd_phred = i * 10 + seq_along(alts),
+               rsid = ifelse(alts == norm_alt[i], if (i == 6) "rs9999" else chip_rs[i], ""),
+               stringsAsFactors = FALSE)
+  }))
+  rows$variant_vcf <- paste(rows$chromosome, rows$position, rows$ref_vcf, rows$alt_vcf, sep = "-")
+  favor_dir <- tempfile("favordb_"); dir.create(favor_dir)
+  on.exit(unlink(favor_dir, recursive = TRUE), add = TRUE)
+  data.table::fwrite(rows, file.path(favor_dir, "chr22_1.csv"))
+  data.table::fwrite(data.frame(Chr = 22L, File_No = 1L, Start_Pos = 1L, End_Pos = 1e7),
+                     file.path(favor_dir, "FAVORdatabase_chrsplit.csv"))
+
+  out_agds <- tempfile(fileext = ".gds")
+  on.exit(unlink(out_agds), add = TRUE)
+  res <- annotate_favor(gds_path, favor_dir, features = "cadd_phred",
+                        match_method = "flexible", rsid_policy = "require",
+                        output_agds = out_agds, verbose = 0)
+
+  expect_equal(res$rsID, chip_rs)                       # the GDS annotation/id is returned
+  expect_equal(res$match_tier, c("exact", "exact", "swapped", "swapped", "flipped", "rsid_conflict"))
+  expect_equal(res$rsid_check, c(rep("same", 5), "differs"))
+  expected <- rows$cadd_phred[match(paste(gf$chr, gf$pos, fref, norm_alt, sep = "-"), rows$variant_vcf)]
+  expect_equal(res$cadd_phred[1:5], expected[1:5])
+  expect_true(is.na(res$cadd_phred[6]))                 # withheld: no annotation
+  expect_equal(res$favor_key[6], paste(gf$chr[6], gf$pos[6], fref[6], norm_alt[6], sep = "-"))
+
+  g <- SeqArray::seqOpen(out_agds)
+  on.exit(SeqArray::seqClose(g), add = TRUE)
+  expect_equal(SeqArray::seqGetData(g, "annotation/info/favor_match_tier"), res$match_tier)
+  expect_equal(SeqArray::seqGetData(g, "annotation/info/favor_rsid_check"), res$rsid_check)
+  stored <- as.numeric(SeqArray::seqGetData(g, "annotation/info/FunctionalAnnotation/cadd_phred"))
+  expect_equal(stored[1:5], expected[1:5]); expect_true(is.na(stored[6]))
+  at <- gdsfmt::get.attr.gdsn(gdsfmt::index.gdsn(g, "annotation/info/FunctionalAnnotation"))
+  expect_equal(at$favor_rsid_policy, "require")
+  expect_equal(at$favor_rsid_source, "annotation/id")
+  expect_equal(at$favor_position_only_rows, "snv")
+  expect_equal(at$favor_rsid_check_names, c("same", "differs", "chip_none", "favor_none"))
+  expect_equal(at$favor_rsid_check_counts, c(5L, 1L, 0L, 0L))
+  expect_equal(at$favor_tier_counts[match("rsid_conflict", at$favor_tier_names)], 1L)
+
+  # Under "record" the same input keeps variant 6 as flipped, with the check
+  # recorded and the tier node unchanged in the other five.
+  rec <- annotate_favor(gds_path, favor_dir, features = "cadd_phred",
+                        match_method = "flexible", rsid_policy = "record", verbose = 0)
+  expect_equal(rec$match_tier, c("exact", "exact", "swapped", "swapped", "flipped", "flipped"))
+  expect_equal(rec$rsid_check, res$rsid_check)
+  expect_equal(rec$cadd_phred, expected)
 })

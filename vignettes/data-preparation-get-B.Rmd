@@ -668,7 +668,7 @@ print(als_data)
 #   Trait type:        binary
 #   Data format:       excel
 #   Variants:         143 (209 removed during QC)
-#   Date prepared:     2025-11-16
+#   Date prepared:     <the date of the run>
 
 # View data
 head(als_data$data[, 1:8])
@@ -726,7 +726,7 @@ print(bmd_data)
 #   Trait type:        continuous
 #   Data format:       excel
 #   Variants:         599 (2071 removed during QC)
-#   Date prepared:     2025-11-16
+#   Date prepared:     <the date of the run>
 
 # Check metadata for conversions applied
 bmd_data$metadata$conversions_applied

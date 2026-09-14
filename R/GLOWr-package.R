@@ -101,6 +101,6 @@ NULL
 
 # Required for data.table's [.data.table dispatch within this package.
 # Without this, data.table falls back to [.data.frame semantics when called
-# from functions in this namespace, breaking key-based lookups in
-# .match_by_position() and other internal functions.
+# from functions in this namespace, breaking key-based lookups in internal
+# functions (the 2026-01-31 FAVOR annotation bug).
 .datatable.aware <- TRUE
