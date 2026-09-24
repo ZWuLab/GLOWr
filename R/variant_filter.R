@@ -23,7 +23,11 @@
 #' (QC, variant type, annotation masks, MAF) without accessing data.
 #'
 #' @param qc_label Character GDS node path for QC status.
-#'   Default "annotation/filter".
+#'   Default "annotation/filter". A variant whose value in this node is missing
+#'   does not pass: \code{SeqArray::seqVCF2GDS()} stores a VCF \code{FILTER} of
+#'   \code{"."} (filters not applied) as \code{NA}, and such variants are
+#'   excluded like any other non-passing variant. A GDS without the node passes
+#'   every variant.
 #' @param qc_pass_value Character value that passes QC. Default "PASS".
 #' @param variant_type Character: "SNV", "Indel", or "variant" (both).
 #'   Default "SNV".

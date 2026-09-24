@@ -16,7 +16,11 @@ variant_filter(
 }
 \arguments{
 \item{qc_label}{Character GDS node path for QC status.
-Default "annotation/filter".}
+Default "annotation/filter". A variant whose value in this node is missing
+does not pass: \code{SeqArray::seqVCF2GDS()} stores a VCF \code{FILTER} of
+\code{"."} (filters not applied) as \code{NA}, and such variants are
+excluded like any other non-passing variant. A GDS without the node passes
+every variant.}
 
 \item{qc_pass_value}{Character value that passes QC. Default "PASS".}
 

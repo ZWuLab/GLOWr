@@ -435,6 +435,12 @@ compute_annotation_medians <- function(gds,
     error = function(e) rep(filter_spec$qc_pass_value, n_candidates)
   )
   qc_pass <- (qc_values == filter_spec$qc_pass_value)
+  # A missing QC value counts as not passing. SeqArray::seqVCF2GDS() stores a
+  # VCF FILTER of "." (filters not applied) as NA; before GLOWr 0.2.1 that NA
+  # propagated into `narrow_pass` and the zero-variant guard below stopped with
+  # "missing value where TRUE/FALSE needed". A GDS converted from PLINK carries
+  # PASS for every variant, so this path is only reached with VCF-derived data.
+  qc_pass[is.na(qc_pass)] <- FALSE
 
   # ---- 3. Variant type filter ----
   if (filter_spec$variant_type != "variant") {

@@ -838,22 +838,13 @@ plot_PI_roc <- function(evaluation_result, show_individual = TRUE,
     return(NA_real_)
   }
 
-  # Sort by predictions descending
-  ord <- order(predictions, decreasing = TRUE)
-  labels <- labels[ord]
-
-  # Compute cumulative TPR and FPR
-  tpr <- cumsum(labels == 1) / n_pos
-  fpr <- cumsum(labels == 0) / n_neg
-
-  # Prepend (0, 0) for complete ROC curve
-  fpr <- c(0, fpr)
-  tpr <- c(0, tpr)
-
-  # Trapezoidal integration
-  # AUC = sum of trapezoids: 0.5 * (fpr[i+1] - fpr[i]) * (tpr[i+1] + tpr[i])
-  n <- length(fpr)
-  auc <- sum(diff(fpr) * (tpr[-1] + tpr[-n]) / 2)
+  # The rank-based (Mann-Whitney) AUC: the probability that a random positive scores
+  # above a random negative, with tied scores counted as half. rank() assigns the
+  # average rank to ties, so a constant prediction scores exactly 0.5. The earlier
+  # cumulative-sort formula gave a tied block the input order, which scored an
+  # intercept-only model 1.0 whenever the positives were listed first.
+  r <- rank(predictions)
+  auc <- (sum(r[labels == 1]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
 
   return(auc)
 }
@@ -887,13 +878,16 @@ plot_PI_roc <- function(evaluation_result, show_individual = TRUE,
     return(list(fpr = c(0, 1), tpr = c(0, 1)))
   }
 
-  # Sort by predictions descending
+  # One point per distinct threshold: sort descending and keep the last row of each
+  # tie group, so a block of tied predictions moves the curve diagonally instead of
+  # in the input order (a constant prediction gives the chance diagonal).
   ord <- order(predictions, decreasing = TRUE)
   labels <- labels[ord]
+  predictions <- predictions[ord]
+  last_of_tie <- !duplicated(predictions, fromLast = TRUE)
 
-  # Compute cumulative rates
-  tpr <- c(0, cumsum(labels == 1) / n_pos)
-  fpr <- c(0, cumsum(labels == 0) / n_neg)
+  tpr <- c(0, (cumsum(labels == 1) / n_pos)[last_of_tie])
+  fpr <- c(0, (cumsum(labels == 0) / n_neg)[last_of_tie])
 
   return(list(fpr = fpr, tpr = tpr))
 }

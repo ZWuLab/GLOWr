@@ -555,3 +555,53 @@ test_that("compute_annotation_medians pool shrinks under tighter filter_spec", {
   expect_false(is.na(n_tight))
   expect_true(n_tight <= n_loose)
 })
+
+# ==============================================================================
+# Missing QC values (a VCF FILTER of ".", stored as NA by seqVCF2GDS)
+# ==============================================================================
+
+# Writes a small VCF and converts it with SeqArray; returns the GDS path.
+.vcf_gds_fixture <- function(filters) {
+  vcf <- tempfile(fileext = ".vcf")
+  gt <- c("0/0\t0/1\t1/1\t0/1", "0/1\t0/0\t0/1\t0/0", "0/0\t0/0\t0/1\t0/1")
+  writeLines(c("##fileformat=VCFv4.2", "##contig=<ID=22>",
+               '##FILTER=<ID=LowQual,Description="Low quality">',
+               '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+               "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4",
+               sprintf("22\t%d\trs%d\t%s\t%s\t.\t%s\t.\tGT\t%s",
+                       c(100L, 200L, 300L), 1:3, c("A", "C", "G"), c("G", "T", "A"),
+                       filters, gt)), vcf)
+  gds_path <- tempfile(fileext = ".gds")
+  SeqArray::seqVCF2GDS(vcf, gds_path, verbose = FALSE)
+  unlink(vcf)
+  gds_path
+}
+
+test_that("a missing QC value counts as not passing instead of stopping", {
+  skip_if_not_installed("SeqArray")
+  gds_path <- .vcf_gds_fixture(c(".", "PASS", "LowQual"))
+  on.exit(unlink(gds_path), add = TRUE)
+  g <- SeqArray::seqOpen(gds_path, readonly = TRUE)
+  on.exit(SeqArray::seqClose(g), add = TRUE)
+  # The premise of the test: SeqArray stores the "." as NA.
+  expect_true(anyNA(SeqArray::seqGetData(g, "annotation/filter")))
+  spec <- variant_filter(variant_type = "SNV", rare_maf_cutoff = 0.5,
+                         min_mac = 0L, min_variants = 1L)
+  vset <- extract_variant_set(g, region = list(chr = "22", start = 1L, end = 1000L),
+                              filter_spec = spec, verbose = 0)
+  # Only the PASS record (the second variant) survives; "." and LowQual are excluded.
+  expect_s3_class(vset, "glow_variant_set")
+  expect_equal(vset$n_variants, 1L)
+  expect_equal(vset$variant_info$variant_id, 2L)
+  expect_equal(vset$n_after_annotation, 1L)
+})
+
+test_that("a region whose QC values are all missing returns NULL, not an error", {
+  skip_if_not_installed("SeqArray")
+  gds_path <- .vcf_gds_fixture(c(".", ".", "."))
+  on.exit(unlink(gds_path), add = TRUE)
+  spec <- variant_filter(variant_type = "SNV", rare_maf_cutoff = 0.5,
+                         min_mac = 0L, min_variants = 1L)
+  expect_null(extract_variant_set(gds_path, region = list(chr = "22", start = 1L, end = 1000L),
+                                  filter_spec = spec, verbose = 0))
+})

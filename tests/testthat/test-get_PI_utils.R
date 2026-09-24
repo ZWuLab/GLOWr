@@ -56,6 +56,21 @@ test_that(".detect_PI_model_type correctly identifies GLM models", {
 # Tests: .compute_auc
 # ==============================================================================
 
+test_that(".compute_auc scores tied predictions at half credit, whatever the input order", {
+  labels <- c(rep(1, 5), rep(0, 20))
+  # A constant prediction (an intercept-only model) is chance, not 1.0, with the cases first
+  expect_equal(GLOWr:::.compute_auc(labels, rep(0.3, 25)), 0.5)
+  expect_equal(GLOWr:::.compute_auc(rev(labels), rep(0.3, 25)), 0.5)
+  # Partial ties: the Mann-Whitney value, invariant to the input order
+  pred <- c(0.9, 0.9, 0.5, 0.5, 0.1, rep(0.5, 10), rep(0.1, 10))
+  o <- sample(25)
+  expect_equal(GLOWr:::.compute_auc(labels, pred), GLOWr:::.compute_auc(labels[o], pred[o]))
+  expect_lt(GLOWr:::.compute_auc(labels, pred), 1)
+  # The ROC curve of a constant prediction is the chance diagonal
+  rc <- GLOWr:::.compute_roc_coords(labels, rep(0.3, 25))
+  expect_equal(rc$fpr, c(0, 1)); expect_equal(rc$tpr, c(0, 1))
+})
+
 test_that(".compute_auc returns 1.0 for perfect classifier", {
   labels <- c(1, 1, 1, 0, 0, 0)
   predictions <- c(0.9, 0.8, 0.7, 0.3, 0.2, 0.1)

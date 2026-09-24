@@ -1,3 +1,18 @@
+# GLOWr 0.2.1
+
+- **Missing QC values no longer stop a region.** `SeqArray::seqVCF2GDS()` stores a VCF
+  `FILTER` of `"."` (filters not applied) as `NA` in `annotation/filter`. The variant
+  filter compared that value with `"PASS"`, obtained `NA`, and the region stopped with
+  "missing value where TRUE/FALSE needed". A missing QC value now counts as not
+  passing, so such variants are excluded like any other non-passing variant, and
+  `?variant_filter` says so. A GDS converted from PLINK carries `PASS` for every
+  variant and is unaffected. Reported by Alberto Brusati on an aGDS built from a VCF.
+- **PI evaluation.** `evaluate_PI_models()` and `plot_PI_roc()` score tied predictions
+  correctly: the AUC is the rank-based statistic with ties at half credit, and the ROC curve
+  takes one point per distinct threshold. Before, an ensemble member whose LASSO kept no
+  feature (a constant prediction) scored an AUC of 1.0 whenever the cases were listed first,
+  which is what the earlier ALS evaluations' "AUC = 1" models were.
+
 # GLOWr 0.2.0
 
 `annotate_favor()` is rewritten around a corrected matching rule and gains a second database

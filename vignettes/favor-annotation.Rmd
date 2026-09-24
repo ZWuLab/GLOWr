@@ -146,21 +146,21 @@ read with `gdsfmt::get.attr.gdsn()`. They record:
 One call per chromosome is the natural unit, and `variant_filter` restricts a call to a
 chromosome or a region of a larger GDS.
 
-## Normalize chip data before conversion (optional)
+## Align chip alleles to the reference before conversion (optional)
 
 Flexible matching finds the right FAVOR row without touching the genotype file. It does not
 change the file's own allele labels, which stay in the probe's order and strand. Another tool
 that reads those labels as genome `REF` and `ALT`, for example when you export the data or merge
 them with external summary statistics, will read them wrongly. If that matters to you, consider
-normalizing the PLINK files before converting them to GDS:
+aligning the alleles of the PLINK files to the reference before converting them to GDS:
 
 - PLINK 2 `--ref-from-fa` sets `REF` from a reference FASTA at every variant where one allele
   matches it, and `--normalize` left-aligns indels.
 - PLINK 2 `--ref-allele` (or PLINK 1.9 `--a2-allele`) sets the reference allele from a list.
 - PLINK 1.9 `--flip` complements listed variants.
 
-This is a recommendation, not a requirement. Normalization cannot resolve a palindromic pair
-(A/T or C/G) either, since it reads the same on both strands. Whether or not you normalize, the
+This is a recommendation, not a requirement. Alignment cannot resolve a palindromic pair
+(A/T or C/G) either, since it reads the same on both strands. Whether or not you align them, the
 outcome and the rsID check are recorded, so the annotation step documents what it did.
 
 ## Appendix A. How matching works

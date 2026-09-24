@@ -84,7 +84,7 @@ position are parsed from the VarInfo column.}
 \item{match_method}{Character. How allele-bearing variants are matched:
 \itemize{
 \item "exact" (default): the key as given only (STAAR-compatible)
-\item "flexible": for SNVs, the lookup key is also normalized against
+\item "flexible": for SNVs, the lookup key is also rewritten against
 FAVOR's reference base by swapping REF and ALT or complementing both
 alleles, for cohorts whose alleles may differ from the reference in
 order or strand (genotyping-chip data). Indels always match by the
@@ -181,7 +181,7 @@ double value of the float32.
 The users obtain the database from the FAVOR team; GLOWr does not
 redistribute it.
 
-\strong{Matching (the lookup key is normalized, never the data):}
+\strong{Matching (the lookup key is rewritten, never the data):}
 Each input row is classified as an SNV (REF and ALT each one of A, C, G, T),
 an indel (A/C/G/T strings, not both of length one), a position-only key
 (both alleles "NA"), or unsupported (anything else, including symbolic
@@ -243,7 +243,7 @@ positions, one group at a time.
 }
 \examples{
 \dontrun{
-# Annotate a chip cohort's GDS from FAVOR 2.0, normalizing the lookup key for
+# Annotate a chip cohort's GDS from FAVOR 2.0, rewriting the lookup key for
 # allele order and strand, and withholding transformed matches that the
 # chip's rsID does not confirm
 annotate_favor(
