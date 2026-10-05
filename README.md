@@ -125,6 +125,9 @@ orchestration package.
     `B` estimation.
   - `vignette("B_estimation_diagnostics_example", package = "GLOWr")` —
     diagnostic tools for `B` estimation.
+  - `vignette("favor-annotation-quick-start", package = "GLOWr")`: the short route
+    through `annotate_favor()`: when to use it, what to have ready, which settings to
+    choose, what comes out, and how to check it.
   - `vignette("favor-annotation", package = "GLOWr")` — annotating a cohort with
     FAVOR: the matching rule, what a tier claims, the rsID evidence, and the cost.
 - **Function help**: `?GLOW_Omni`, `?get_B`, `?get_PI`, `?getZ_marg_score`, etc.

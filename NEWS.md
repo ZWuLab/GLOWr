@@ -1,3 +1,11 @@
+# GLOWr 0.2.2
+
+- **A quick-start vignette for the FAVOR annotator.** `vignette("favor-annotation-quick-start")`
+  walks a new user from when to use `annotate_favor()`, through what to have ready and which
+  settings to choose, to what the call returns and how to check it. It points into the full
+  vignette for the evidence, the cost table and the matching procedure, which are unchanged.
+  Written from user feedback. No code changed.
+
 # GLOWr 0.2.1
 
 - **Missing QC values no longer stop a region.** `SeqArray::seqVCF2GDS()` stores a VCF

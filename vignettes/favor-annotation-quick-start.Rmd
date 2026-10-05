@@ -1,0 +1,181 @@
+---
+title: "Quick start: annotating with FAVOR"
+author: "GLOWr Package"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Quick start: annotating with FAVOR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
+```
+
+This vignette is the short route through `annotate_favor()`: when to use it, what to have
+ready, which settings to choose, what comes out, and how to check it. The companion vignette
+"Annotating genotype data with FAVOR" (`vignette("favor-annotation", package = "GLOWr")`) gives
+the evidence, the cost measurements and the matching procedure in full. 
+
+## When to use annotate_favor()
+
+Use `annotate_favor()` when you have variants on GRCh38 and need FAVOR's functional
+annotation attached to them: a cohort GDS that a GLOW scan (the variant-set association
+method of this package, run by the GLOWpipeline package) or STAARpipeline will read, or a
+table of variants for training GLOWr's variant-importance score (PI), which weights the
+variants in a scan. The function reads the FAVOR database from
+your own disk, finds the database row for each variant, and returns the annotation together
+with a record of how each variant was matched. With `output_agds` it also writes the annotated
+GDS (an aGDS) in the layout that GLOW's scans and STAARpipeline read.
+
+FAVOR keys every variant by `CHR-POS-REF-ALT`, where `REF` is the base the reference genome
+carries. `match_method = "exact"` looks the key up exactly as given, so it annotates only
+the variants whose alleles already follow that convention. Sequencing data in VCF form do. Genotyping-chip data usually do not, because a PLINK file carries each probe's
+two alleles in the probe's own order and on the probe's strand. Beyond the exact lookup,
+`annotate_favor()` adds four things:
+
+- **Flexible allele matching, with a check.** For a chip SNV it also tries the key with the
+  alleles swapped, with both complemented, and with both, and it records which form found
+  the row (`match_tier`). It then compares the input's rsID with the matched row's
+  (`rsid_check`) and by default withholds a rewritten match that the rsID contradicts. Your
+  genotype file is never changed. On an ALS case-control data set genotyped on an Illumina array, about 48,000
+  samples and 413,528 variants, the allele labeled `REF` was the reference base for 36% of
+  the variants, so exact matching would have annotated that share only. Flexible matching
+  found a row for all of them, and the chip's rsID agreed with the FAVOR row's for 99.89% of
+  the 265,462 matches found by a rewritten key.
+
+- **Variants without alleles.** `annotate_favor()` annotates a key of the form
+  `CHR-POS-NA-NA`, common in literature-curated variant lists, from the SNV rows at the
+  position, and labels it `position_only`, so you know which values are aggregates.
+
+- **Both database releases, read locally.** The FAVOR v1 CSV chunks and the FAVOR 2.0 Parquet
+  files are both read, and the provenance of the annotation (database files, settings, outcome
+  counts, date) is written into the aGDS.
+
+- **Throughput for a whole cohort.** With FAVOR 2.0, the 22 autosomes of that chip data set
+  took 2,333 seconds in total, and chromosome 22 of the 1000 Genomes high-coverage sequencing
+  panel (3,202 samples, 1,066,557 variants) took 205 seconds. The companion vignette's cost
+  table gives time and peak memory for both database routes.
+
+## What you need
+
+`annotate_favor()` needs these ready before the call: variants on GRCh38 in one of three
+forms, the FAVOR database on disk, two R packages, rsIDs when the input is chip data, and disk
+space for the aGDS.
+
+| Need | Details |
+| --- | --- |
+| Variants on GRCh38 | FAVOR's positions are GRCh38. Convert the positions first if your data are on another build. |
+| The variants, in one of three forms | A GDS file path (one chromosome per call, the usual form for a cohort). A data frame with a `VarInfo` column of `CHR-POS-REF-ALT` keys and, optionally, an `rsID` column. The case or control object from `prepare_PI_case_data()` or `prepare_PI_control_data()`. |
+| The FAVOR database on disk | Obtained from the FAVOR team, since GLOWr does not redistribute it. Either the v1 CSV chunk directory of `chr<N>_<K>.csv` files (its split table `FAVORdatabase_chrsplit.csv` is bundled with GLOWr), or the FAVOR 2.0 directory of `chromosome_<N>.parquet` files. |
+| R packages | GLOWr. `SeqArray` for GDS input and aGDS output. `arrow` for the Parquet files. The optional command-line tool `xsv` speeds up the CSV route. Without it the chunks are read with `data.table::fread()`. |
+| rsIDs in the input, for chip data | A GDS made with `SeqArray::seqBED2GDS()` carries column 2 of the `.bim` as `annotation/id`. That is the evidence the rsID check reads, so keep it. |
+| Disk space | The aGDS is a copy of the input GDS plus the annotation nodes. |
+
+## Which settings to choose
+
+The call for one chromosome of chip data is one line per argument. Replace the three paths
+with your own. The example does not create them.
+
+```{r call}
+res <- annotate_favor(
+  variants      = "genotypes/chr22.gds",          # your GDS, one chromosome
+  favor_db_path = "/path/to/FAVOR2.0",            # the FAVOR 2.0 directory, or the v1 chunk directory
+  match_method  = "flexible",                     # "exact" for sequencing data in the reference convention
+  favor_release = "FAVOR 2.0, downloaded 2026",   # a free-text label recorded in the aGDS provenance
+  output_agds   = "genotypes_favor/chr22.gds",    # the annotated GDS for the scans
+  output_csv    = "genotypes_favor/chr22.csv")    # the returned table on disk, for the record
+```
+
+The arguments that decide what happens:
+
+| Argument | Choose | Why |
+| --- | --- | --- |
+| `match_method` | `"flexible"` for chip data. `"exact"` for sequencing data whose alleles follow the reference convention. | Exact matching tries the key as given only. Flexible matching adds the three rewritten keys for SNVs. Indels match by the exact key under both. |
+| `rsid_policy` | Leave the default `"require"` for an annotation you will analyze. `"record"` to see what the lookup alone finds. | Under `"require"` a rewritten match whose rsID differs from the row's, or whose row carries no rsID, is withheld as `rsid_conflict`. Exact matches, and inputs without rsIDs, are never withheld. |
+| `features` | Leave the default unless you need fewer fields. | The default is the 30 fields of the FAVOR Essential Database: 20 numeric scores and 10 categorical fields, among them the GENCODE and MetaSVM fields the built-in coding masks read. FAVOR 2.0 lacks four older score versions, so the default yields 26 fields there. |
+| `output_agds`, `update_gds`, `output_csv` | `output_agds` for a new annotated file. `update_gds = TRUE` to write the annotation into the input GDS instead. `output_csv` for the table. | See the next section. |
+| `variant_filter` | `list(chr = "22")`, or `list(chr = "22", start = 1e6, end = 5e6)`, to restrict a call. | One call per chromosome is the natural unit. |
+| `favor_db_format` | Leave `"auto"`. | The layout is detected from the directory. A directory holding both layouts, or neither, is an error, and you then name the format. |
+| `na_allele_method` | `"average"` (the default) or `"first"`. | Only for `CHR-POS-NA-NA` keys. Resolve the alleles first when you can. |
+| `na_handling` | Leave `"keep"`. | `"zero"` replaces a missing numeric value with 0. `"drop"` removes rows with any missing annotation from the table and the CSV. Neither changes the matching outcome. |
+
+## What you get
+
+One call to `annotate_favor()` can produce up to three things: the returned table for
+inspection, a CSV copy for the record, and an annotated GDS for the scans of GLOW and
+STAARpipeline. The table says which is for auditing and which for analysis.
+
+| Output | What it is | Use it for |
+| --- | --- | --- |
+| `res`, the returned data frame | The input columns (for a GDS also `variant_id` and `rsID`), one column per annotation feature, and the three records `match_tier`, `favor_key` and `rsid_check`. | Inspecting and auditing the matching. The input of the variant-importance training functions. |
+| `output_csv` | The same table written to disk. | The record you keep. With the returned table, the only place `favor_key` is stored. |
+| `output_agds`, or the input GDS under `update_gds = TRUE` | A copy of the input GDS plus one node per feature under `annotation/info/FunctionalAnnotation`, the outcome as `annotation/info/favor_match_tier`, the check as `annotation/info/favor_rsid_check`, and the provenance as attributes of the `FunctionalAnnotation` folder. | The downstream analyses: GLOW's gene, window and coding scans, and STAARpipeline. |
+
+`favor_key` is the `CHR-POS-REF-ALT` of the FAVOR row that supplied the annotation, or of the
+row withheld under `rsid_conflict`. The aGDS does not store it, so keep the returned table or
+request `output_csv` when you need the keys.
+
+## How to know it worked
+
+Two checks confirm that the call worked: the outcome counts in the returned table, and the
+same counts read back from the aGDS. Read the outcome table first:
+
+```{r check}
+table(res$match_tier)
+table(res$rsid_check)
+```
+
+- On chip data under flexible matching, expect the four key forms (`exact`, `swapped`,
+  `flipped`, `flipped_swapped`), a small number of `rsid_conflict`, and the reasons a key was
+  not found. On the chip data set above, the default policy withheld 289 rewritten matches,
+  about one in a thousand.
+
+- On sequencing data under exact matching, expect `exact` and the reasons a key was not
+  found: `uncovered` (FAVOR has no row at the position), `unmatched_alt` (the position is
+  covered and the reference base agrees, but FAVOR has no row for that allele pair) and
+  `unmatched_ref` (the input's `REF` is not the reference base).
+
+- `rsid_check` is mostly `same` on chip data. It is `chip_none` throughout when the input
+  carries no rsIDs, the usual case for sequencing data, and nothing is then withheld.
+
+- A large `unmatched_ref` share on chip data under exact matching means the alleles do not
+  follow the reference convention. Rerun with `match_method = "flexible"`.
+
+Then confirm that the aGDS carries the annotation. The counts must equal those of `res`:
+
+```{r agds}
+g <- SeqArray::seqOpen("genotypes_favor/chr22.gds")
+table(SeqArray::seqGetData(g, "annotation/info/favor_match_tier"))
+table(SeqArray::seqGetData(g, "annotation/info/favor_rsid_check"))
+fa <- gdsfmt::index.gdsn(g, "annotation/info/FunctionalAnnotation")
+gdsfmt::ls.gdsn(fa)                 # one node per annotation feature
+str(gdsfmt::get.attr.gdsn(fa))      # the provenance: database files, settings, counts, date
+SeqArray::seqClose(g)
+```
+
+## Where to read more
+
+Three places carry more than this quick start does:
+
+- `vignette("favor-annotation", package = "GLOWr")`: the evidence, the cost table, the two
+  database layouts, where each record lives, and the optional alignment of chip alleles
+  before conversion. Its appendices give every value of `match_tier` and `rsid_check` (A),
+  the keys without alleles (B), and a worked example on a made-up database that you can
+  run (C).
+
+- `?annotate_favor`: every argument and its default.
+
+- The GLOWanalyses workflow templates run `annotate_favor()` per chromosome as a job array
+  (`00-data-prep/annotate-favor.R` with `slurm/run-annotate-favor.sh`) and write a provenance
+  snapshot beside the output.
+
+## References
+
+- Zhou, H., Arapoglou, T., Li, X., et al. (2023). FAVOR: functional annotation of variants
+  online resource and annotator for variation across the human genome. *Nucleic Acids
+  Research*, 51(D1), D1300-D1311. doi:10.1093/nar/gkac966.
+- Zhou, H., Verma, V., Li, X., et al. (2026). FAVOR 2.0: A reengineered functional annotation of
+  variants online resource for interpreting genomic variation. *Nucleic Acids Research*, 54(D1),
+  D1405-D1414. doi:10.1093/nar/gkaf1217.
