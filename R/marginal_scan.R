@@ -11,6 +11,7 @@
 #
 # INTERNAL HELPERS:
 #   - .precompute_scan_components()  Extract components from null model
+#   - .scan_variant_chunk()          One chunk: filter, read, score, metadata
 #   - .process_chunk_standard()      Standard asymptotic Z per chunk
 #   - .process_chunk_SPA()           SPA-adjusted Z per chunk
 #   - .impute_geno()                 Missing genotype imputation + MAF/MAC
@@ -39,6 +40,15 @@
 #' @param missing_imputation Character method for missing genotypes: "mean"
 #'   or "zero". Default: "mean".
 #' @param output_csv Optional path to write results as CSV. Default: NULL.
+#' @param n_cores Integer (default 1). Number of forked workers over which the
+#'   variant chunks are spread (\code{parallel::mclapply}). The chunks are
+#'   split into \code{n_cores} contiguous groups, each worker opens its own
+#'   GDS handle and processes its group in order, and the groups are bound in
+#'   order, so the result is the same as with one core. Forking is not
+#'   available on Windows, where a value above 1 warns and runs serially.
+#'   Memory grows with the workers (each holds its own chunk), and a machine
+#'   with a threaded BLAS should set \code{OPENBLAS_NUM_THREADS=1} to avoid
+#'   oversubscription.
 #' @param verbose Integer verbosity level (0=silent, 1=progress, 2=detailed).
 #'
 #' @return A data.frame with class "glow_marginal_scan" containing columns:
@@ -84,7 +94,7 @@
 marginal_scan <- function(gds_file, null_model, sample_id = NULL,
                           use_SPA = NULL, chunk_size = 2000L,
                           mac_cutoff = 1L, missing_imputation = "mean",
-                          output_csv = NULL, verbose = 1) {
+                          output_csv = NULL, n_cores = 1L, verbose = 1) {
   if (!requireNamespace("SeqArray", quietly = TRUE)) {
     stop("SeqArray package required. Install with: BiocManager::install('SeqArray')")
   }
@@ -93,6 +103,15 @@ marginal_scan <- function(gds_file, null_model, sample_id = NULL,
   stopifnot(inherits(null_model, "glow_null_model"))
   stopifnot(file.exists(gds_file))
   stopifnot(is.numeric(chunk_size), length(chunk_size) == 1, chunk_size >= 1)
+  if (!is.numeric(n_cores) || length(n_cores) != 1L || is.na(n_cores) || n_cores < 1) {
+    stop("n_cores must be a single integer >= 1")
+  }
+  n_cores <- as.integer(n_cores)
+  if (n_cores > 1L && .Platform$OS.type == "windows") {
+    warning("n_cores > 1 needs forked workers, which Windows does not support; ",
+            "running with one core.")
+    n_cores <- 1L
+  }
 
   missing_imputation <- match.arg(missing_imputation, c("mean", "zero"))
 
@@ -148,60 +167,56 @@ marginal_scan <- function(gds_file, null_model, sample_id = NULL,
 
   # Set up chunks
   n_chunks <- ceiling(n_variants / chunk_size)
-  results_list <- vector("list", n_chunks)
+  chunk_ids <- function(i) {
+    all_variant_ids[((i - 1L) * chunk_size + 1L):min(i * chunk_size, n_variants)]
+  }
+  scan_chunk <- function(handle, i) {
+    .scan_variant_chunk(handle, chunk_ids(i), sample_id, reorder_idx,
+                        components, null_model, use_SPA, missing_imputation)
+  }
 
-  for (i in seq_len(n_chunks)) {
-    start_idx <- (i - 1L) * chunk_size + 1L
-    end_idx <- min(i * chunk_size, n_variants)
-    chunk_variant_ids <- all_variant_ids[start_idx:end_idx]
-
-    # Set filter for this chunk
-    SeqArray::seqSetFilter(gds, sample.id = sample_id,
-                           variant.id = chunk_variant_ids, verbose = FALSE)
-
-    # Read variant metadata for this chunk
-    chr <- SeqArray::seqGetData(gds, "chromosome")
-    pos <- SeqArray::seqGetData(gds, "position")
-    allele_str <- SeqArray::seqGetData(gds, "allele")
-    vid <- SeqArray::seqGetData(gds, "variant.id")
-
-    # Parse alleles
-    allele_split <- strsplit(allele_str, ",")
-    ref <- vapply(allele_split, `[`, character(1), 1)
-    alt <- vapply(allele_split, `[`, character(1), 2)
-
-    # Read genotype dosage (n_filtered_samples x n_chunk_variants)
-    G <- SeqArray::seqGetData(gds, "$dosage")
-
-    # Reorder rows to match null model sample order
-    G <- G[reorder_idx, , drop = FALSE]
-
-    # Process chunk
-    if (isTRUE(use_SPA)) {
-      chunk_result <- .process_chunk_SPA(G, components, null_model,
-                                          missing_imputation)
-    } else {
-      chunk_result <- .process_chunk_standard(G, components,
-                                               missing_imputation)
+  if (n_cores == 1L || n_chunks == 1L) {
+    # Serial path: the chunks in order on the handle opened above.
+    results_list <- vector("list", n_chunks)
+    for (i in seq_len(n_chunks)) {
+      results_list[[i]] <- scan_chunk(gds, i)
+      if (verbose >= 1 && n_chunks > 1) {
+        message(sprintf("  Chunk %d/%d (%d variants)", i, n_chunks,
+                        length(chunk_ids(i))))
+      }
     }
-
-    # Combine with variant metadata
-    chunk_df <- data.frame(
-      chr = chr,
-      pos = pos,
-      ref = ref,
-      alt = alt,
-      variant_id = vid,
-      chunk_result,
-      stringsAsFactors = FALSE
-    )
-
-    results_list[[i]] <- chunk_df
-
-    if (verbose >= 1 && n_chunks > 1) {
-      message(sprintf("  Chunk %d/%d (%d variants)", i, n_chunks,
-                      end_idx - start_idx + 1L))
+  } else {
+    # Parallel path: contiguous groups of chunks, one forked worker per group,
+    # each with its own read-only handle (a handle is not shared across forks).
+    # The groups come back in order and are bound in order, so the table equals
+    # the serial one.
+    n_workers <- min(n_cores, n_chunks)
+    groups <- parallel::splitIndices(n_chunks, n_workers)
+    if (verbose >= 1) {
+      message(sprintf("  %d chunks over %d forked workers", n_chunks, n_workers))
     }
+    run_group <- function(idx) {
+      # allow.duplicate: the parent's handle is inherited by the fork, and
+      # gdsfmt refuses a second open of the same file otherwise.
+      g2 <- SeqArray::seqOpen(gds_file, readonly = TRUE, allow.duplicate = TRUE)
+      on.exit(SeqArray::seqClose(g2), add = TRUE)
+      out <- vector("list", length(idx))
+      for (k in seq_along(idx)) {
+        out[[k]] <- scan_chunk(g2, idx[k])
+        if (verbose >= 2) {
+          message(sprintf("  worker chunk %d/%d done", idx[k], n_chunks))
+        }
+      }
+      out
+    }
+    parts <- parallel::mclapply(groups, run_group, mc.cores = n_workers)
+    failed <- vapply(parts, function(x) inherits(x, "try-error"), logical(1))
+    if (any(failed)) {
+      stop("marginal_scan: a worker failed: ",
+           paste(unique(vapply(parts[failed], as.character, character(1))),
+                 collapse = "; "))
+    }
+    results_list <- unlist(parts, recursive = FALSE)
   }
 
   # Combine all chunks
@@ -570,6 +585,68 @@ annotate_gds_marginal <- function(gds_path, results,
     weights = null_model$weights,
     trait = null_model$trait,
     s0 = null_model$s0
+  )
+}
+
+
+#' Scan One Chunk of Variants
+#'
+#' Sets the filter to the chunk's variants and the null-model samples, reads
+#' the metadata and the dosage, reorders the rows to the null model's sample
+#' order, and computes the per-variant statistics. One body for the serial and
+#' the parallel paths of \code{marginal_scan()}.
+#'
+#' @param gds An open \code{SeqVarGDSClass}.
+#' @param chunk_variant_ids The chunk's variant ids.
+#' @param sample_id,reorder_idx The null-model samples and the row order that
+#'   maps the GDS sample order back to them.
+#' @param components,null_model,use_SPA,missing_imputation As in
+#'   \code{marginal_scan()}.
+#' @return A data.frame: chr, pos, ref, alt, variant_id, then the statistics.
+#' @keywords internal
+#' @noRd
+.scan_variant_chunk <- function(gds, chunk_variant_ids, sample_id, reorder_idx,
+                                components, null_model, use_SPA,
+                                missing_imputation) {
+  # Set filter for this chunk
+  SeqArray::seqSetFilter(gds, sample.id = sample_id,
+                         variant.id = chunk_variant_ids, verbose = FALSE)
+
+  # Read variant metadata for this chunk
+  chr <- SeqArray::seqGetData(gds, "chromosome")
+  pos <- SeqArray::seqGetData(gds, "position")
+  allele_str <- SeqArray::seqGetData(gds, "allele")
+  vid <- SeqArray::seqGetData(gds, "variant.id")
+
+  # Parse alleles
+  allele_split <- strsplit(allele_str, ",")
+  ref <- vapply(allele_split, `[`, character(1), 1)
+  alt <- vapply(allele_split, `[`, character(1), 2)
+
+  # Read genotype dosage (n_filtered_samples x n_chunk_variants)
+  G <- SeqArray::seqGetData(gds, "$dosage")
+
+  # Reorder rows to match null model sample order
+  G <- G[reorder_idx, , drop = FALSE]
+
+  # Process chunk
+  if (isTRUE(use_SPA)) {
+    chunk_result <- .process_chunk_SPA(G, components, null_model,
+                                        missing_imputation)
+  } else {
+    chunk_result <- .process_chunk_standard(G, components,
+                                             missing_imputation)
+  }
+
+  # Combine with variant metadata
+  data.frame(
+    chr = chr,
+    pos = pos,
+    ref = ref,
+    alt = alt,
+    variant_id = vid,
+    chunk_result,
+    stringsAsFactors = FALSE
   )
 }
 

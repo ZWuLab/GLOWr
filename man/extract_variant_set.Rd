@@ -13,6 +13,7 @@ extract_variant_set(
   Annotation_dir = "annotation/info/FunctionalAnnotation",
   Annotation_name_catalog = NULL,
   impute_method = "mean",
+  variant_index = NULL,
   verbose = 1
 )
 }
@@ -47,6 +48,15 @@ AF <= 0.5, or 2 when AF > 0.5; in both cases the imputed value assumes
 the individual carries zero copies of the minor allele. This matches
 the legacy STAARpipeline \code{matrix_flip_minor()} behavior.}
 
+\item{variant_index}{A \code{glow_variant_index} from
+\code{\link{build_variant_index}} for this GDS, or NULL (default). With an
+index the region's records are found by binary search on the index and
+the GDS filter is set by file position, so a scan over many regions does
+not re-read the chromosome's variant table for each one. Without it the
+function builds an index for this call, which costs one read of the
+chromosome, as before. The selection and the returned object are the
+same either way.}
+
 \item{verbose}{Integer verbosity level.}
 }
 \value{
@@ -57,6 +67,14 @@ has fewer than \code{filter_spec$min_variants} qualifying variants.
 Reads genotype data from a GDS/aGDS file, applies QC, variant type,
 positional, and annotation-based filters, and returns a prepared
 variant set for downstream processing and testing.
+}
+\details{
+Cost: with a prebuilt index, locating a region costs two binary searches on
+the chromosome's positions, so the per-region cost is set by the filtered
+records of the region alone. Without an index, each call reads the
+chromosome's variant table once (linear in the chromosome's record count).
+The orchestration layer (\code{GLOWpipeline::glow_scan_chunk}) builds the
+index once per chunk and passes it to every region.
 }
 \examples{
 \dontrun{

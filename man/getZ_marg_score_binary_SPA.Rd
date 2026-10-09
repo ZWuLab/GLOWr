@@ -44,6 +44,9 @@ effects are fixed (including H0), given X and G fixed. Identical to non-SPA vers
 when effects are fixed (including H0), given X and G fixed.}
 \item{s0}{Numeric scalar equal to 1 (dispersion parameter for binary traits with
 canonical logistic link).}
+\item{n_spa_fallback}{Integer: the number of columns for which SPAtest
+returned no p-value and the standard score Z was used instead (see
+Details). 0 in the usual case.}
 }
 }
 \description{
@@ -141,6 +144,24 @@ where \eqn{t_{\text{SPA}}} is the SPA computation time per variant
 \item SPA adds computational cost but provides Type I error control for rare variants
 }
 }
+\section{The SPA fallback}{
+
+\code{SPAtest::ScoreTest_SPA()} skips a column when
+\code{min(sum(g), sum(2 - g))} is below \code{minmac}, a guard written for
+dosages in \eqn{[0, 2]}. A collapsed burden column (the row sum of many
+ultra-rare variants, see \code{\link{collapse_rare_variants}}) whose mean
+exceeds 1 has \code{sum(2 - g) < 0} and is skipped even with the
+\code{minmac = 0} passed here, so its p-value comes back NA. For such a
+column SPAtest's own computation, past the guard, uses the normal
+approximation, because the standardized score is far below the cutoff at
+which the saddlepoint starts; the standard score Z,
+\eqn{Z_j = S_j / \sqrt{M_{s,jj}}}, is therefore the value SPA would have
+given. That Z is used for every column SPAtest returned NA for, a warning
+states how many, and the count is returned as \code{n_spa_fallback}. This
+matches the practice of the GLOW methodology paper, which applied SPA to
+the non-collapsed variants only.
+}
+
 \examples{
 # Example 1: Balanced case-control with common and rare variants
 set.seed(123)

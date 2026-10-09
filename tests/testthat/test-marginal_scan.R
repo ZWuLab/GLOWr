@@ -433,3 +433,22 @@ test_that("annotate_gds_marginal includes SPA columns when present", {
   expect_true("Z_SPA" %in% attrs$column_names)
   expect_true("pvalue_SPA" %in% attrs$column_names)
 })
+
+# ==============================================================================
+# 2026-10-09: n_cores spreads the chunks over forked workers, same table
+# ==============================================================================
+test_that("marginal_scan with n_cores = 2 returns the same table as with 1", {
+  skip_if_no_test_gds()
+  skip_on_os("windows")
+  skip_if(parallel::detectCores() < 2L, "needs two cores")
+  pheno <- extract_pheno_covar_gds(test_gds_path, covar_names = "sex",
+                                    verbose = 0)
+  nm <- fit_null_model(pheno$X, pheno$Y, trait = "binary",
+                       sample_id = pheno$sample_id)
+  r1 <- suppressWarnings(marginal_scan(test_gds_path, nm, chunk_size = 7L,
+                                       n_cores = 1L, verbose = 0))
+  r2 <- suppressWarnings(marginal_scan(test_gds_path, nm, chunk_size = 7L,
+                                       n_cores = 2L, verbose = 0))
+  expect_equal(r1, r2)
+  expect_error(marginal_scan(test_gds_path, nm, n_cores = 0L), "n_cores")
+})

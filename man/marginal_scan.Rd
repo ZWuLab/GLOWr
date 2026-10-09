@@ -13,6 +13,7 @@ marginal_scan(
   mac_cutoff = 1L,
   missing_imputation = "mean",
   output_csv = NULL,
+  n_cores = 1L,
   verbose = 1
 )
 }
@@ -39,6 +40,16 @@ MAC < mac_cutoff are excluded from results. Default: 1L.}
 or "zero". Default: "mean".}
 
 \item{output_csv}{Optional path to write results as CSV. Default: NULL.}
+
+\item{n_cores}{Integer (default 1). Number of forked workers over which the
+variant chunks are spread (\code{parallel::mclapply}). The chunks are
+split into \code{n_cores} contiguous groups, each worker opens its own
+GDS handle and processes its group in order, and the groups are bound in
+order, so the result is the same as with one core. Forking is not
+available on Windows, where a value above 1 warns and runs serially.
+Memory grows with the workers (each holds its own chunk), and a machine
+with a threaded BLAS should set \code{OPENBLAS_NUM_THREADS=1} to avoid
+oversubscription.}
 
 \item{verbose}{Integer verbosity level (0=silent, 1=progress, 2=detailed).}
 }

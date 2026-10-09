@@ -1,3 +1,47 @@
+# GLOWr 0.2.3
+
+Changes for whole-genome-sequencing scans, after Alberto Brusati's Terra runs of chromosomes
+with eleven million variant records. Results are unchanged wherever the previous version
+completed.
+
+- **A variant index for region lookup.** `build_variant_index()` reads a GDS file's
+  chromosome, position and id vectors once. `extract_variant_set()` and `glow_region_test()`
+  take it as `variant_index` and find a region's records by binary search, setting the GDS
+  filter by file position, instead of re-reading the chromosome's variant table and matching
+  ids for every region. On a chromosome of one million records a 2 kb window cost 0.40 s in
+  the lookup before and about 0.02 s after; the saving grows with the chromosome's record
+  count. A call without an index builds one for itself and selects exactly as before.
+  `count_index_records()` counts the records of an index inside genomic spans.
+- **A faster LD step.** `filter_variants_ld()` computes the correlation of its NA-free
+  genotype matrix as one BLAS cross-product of the standardized columns instead of
+  `cor(use = "pairwise.complete.obs")`, and its greedy prune keeps each variant's count of
+  above-threshold partners up to date instead of recomputing the whole threshold mask after
+  every removal. The selection rule and the tie-breaking are unchanged, so the kept variants
+  are the same. A gene of 2,018 rare SNVs took 169 s in this step before. A matrix with
+  missing values keeps the previous path.
+- **A linear-dependence step that does not pay for the columns it drops.** After the LD
+  prune, `filter_variants_ld()` drops the columns that are exact linear combinations of the
+  columns before them. It did this with LINPACK `qr()`, which cycles every dropped column to
+  the end of the matrix by shifting the remaining columns, so a gene with far more rare
+  variants than samples (14,038 columns, 3,195 kept, at 3,202 samples) spent 367 s there.
+  The step is now a blocked in-order Gram-Schmidt with `qr()`'s rule and tolerance (a column
+  is dropped when its residual against the kept columns before it is below 1e-07 of its
+  norm), in BLAS calls, stopping once the kept count reaches the number of samples carrying a
+  variant. The kept columns are the same, checked on every chromosome 22 gene of the 1000
+  Genomes cohort; that gene's step takes a few seconds. A matrix with missing values now
+  stops with a message, where `qr()` stopped with an opaque one.
+- **A fallback where SPA returns no p-value.** `SPAtest::ScoreTest_SPA()` skips a column whose
+  `min(sum(g), sum(2 - g))` is below its minimum, a guard written for dosages in [0, 2]. A
+  collapsed burden column (the row sum of many ultra-rare variants) with a mean above 1 fails
+  it, came back NA, and `glow_test()` stopped on the gene. SPAtest's own computation uses the
+  normal approximation for such a column past the guard, so `getZ_marg_score_binary_SPA()` now
+  gives it the standard score Z, warns with the count, and returns the count as
+  `n_spa_fallback`. This matches the GLOW methodology paper, which applied SPA to the
+  non-collapsed variants only.
+- **`marginal_scan()` gains `n_cores`** (default 1): the variant chunks are spread over forked
+  workers, each with its own GDS handle, and the result table is the same as with one core.
+  Not available on Windows.
+
 # GLOWr 0.2.2
 
 - **A quick-start vignette for the FAVOR annotator.** `vignette("favor-annotation-quick-start")`

@@ -136,6 +136,13 @@
 #'   diagnostic columns. They are cheap (computed from \code{input$G} and
 #'   the score-stat Z this function already holds) and do not require
 #'   \code{return_evidence}. Default FALSE leaves the canonical row unchanged.
+#' @param variant_index A \code{glow_variant_index} for \code{gds} from
+#'   \code{\link{build_variant_index}}, or NULL (default). Passed to
+#'   \code{\link{extract_variant_set}}: with it, the region's records are found
+#'   by binary search on the index instead of a read of the chromosome's variant
+#'   table, which is what makes a scan over thousands of regions cheap on a
+#'   whole-genome-sequencing chromosome. The orchestration layer builds it once
+#'   per chunk. Without it the extraction builds one for this call.
 #' @param verbose Integer (default 0). Verbosity threaded to the underlying calls.
 #'
 #' @return A list with components:
@@ -211,6 +218,7 @@ glow_region_test <- function(gds, region, filter_spec,
                              staar = NULL,
                              return_evidence = FALSE,
                              region_summary = FALSE,
+                             variant_index = NULL,
                              verbose = 0) {
 
   # ---- Caller-contract validation (fail fast on misuse) ----
@@ -258,6 +266,7 @@ glow_region_test <- function(gds, region, filter_spec,
     vset <- extract_variant_set(gds, region, filter_spec,
                                 sample_id = null_model$sample_id,
                                 annotation_names = pi_features,
+                                variant_index = variant_index,
                                 verbose = verbose)
     if (is.null(vset)) return(empty_result("skip_empty"))
 

@@ -22,6 +22,7 @@ glow_region_test(
   staar = NULL,
   return_evidence = FALSE,
   region_summary = FALSE,
+  variant_index = NULL,
   verbose = 0
 )
 }
@@ -106,6 +107,14 @@ the SPA Z exists, i.e. a binary trait). These are standard per-region
 diagnostic columns. They are cheap (computed from \code{input$G} and
 the score-stat Z this function already holds) and do not require
 \code{return_evidence}. Default FALSE leaves the canonical row unchanged.}
+
+\item{variant_index}{A \code{glow_variant_index} for \code{gds} from
+\code{\link{build_variant_index}}, or NULL (default). Passed to
+\code{\link{extract_variant_set}}: with it, the region's records are found
+by binary search on the index instead of a read of the chromosome's variant
+table, which is what makes a scan over thousands of regions cheap on a
+whole-genome-sequencing chromosome. The orchestration layer builds it once
+per chunk. Without it the extraction builds one for this call.}
 
 \item{verbose}{Integer (default 0). Verbosity threaded to the underlying calls.}
 }

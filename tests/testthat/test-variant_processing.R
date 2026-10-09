@@ -364,3 +364,161 @@ test_that("aggregate_B_PI with no collapsing returns original values", {
   expect_equal(agg$B_collapsed, B)
   expect_equal(agg$PI_collapsed, PI)
 })
+
+
+# ---- 2026-10-09: the BLAS cross-product + incremental prune select the same
+#      columns as the previous implementation (kept here as the reference) ----
+
+.ref_greedy_ld_prune <- function(R, threshold, MAF = NULL, prefer_keep = "first") {
+  p <- ncol(R)
+  diag(R) <- 0
+  removed <- logical(p)
+  repeat {
+    high_ld <- abs(R) > threshold
+    high_ld[removed, ] <- FALSE
+    high_ld[, removed] <- FALSE
+    n_partners <- colSums(high_ld)
+    if (max(n_partners) == 0) break
+    max_partners <- max(n_partners)
+    candidates <- which(n_partners == max_partners)
+    if (length(candidates) == 1) {
+      worst <- candidates
+    } else if (prefer_keep == "lower_maf" && !is.null(MAF)) {
+      worst <- candidates[which.max(MAF[candidates])]
+    } else if (prefer_keep == "higher_maf" && !is.null(MAF)) {
+      worst <- candidates[which.min(MAF[candidates])]
+    } else {
+      worst <- candidates[length(candidates)]
+    }
+    removed[worst] <- TRUE
+  }
+  which(removed)
+}
+
+.ref_filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
+                                    prefer_keep = "lower_maf") {
+  p <- ncol(G)
+  if (p <= 1) return(seq_len(p))
+  MAF <- if (prefer_keep != "first") {
+    af <- colMeans(G, na.rm = TRUE) / 2
+    pmin(af, 1 - af)
+  } else NULL
+  col_vars <- apply(G, 2, var, na.rm = TRUE)
+  zero_var <- col_vars < .Machine$double.eps
+  if (all(zero_var)) return(integer(0))
+  var_idx <- which(!zero_var)
+  if (length(var_idx) <= 1) {
+    keep <- var_idx
+  } else {
+    R <- cor(G[, var_idx, drop = FALSE], use = "pairwise.complete.obs")
+    var_MAF <- if (!is.null(MAF)) MAF[var_idx] else NULL
+    to_remove <- .ref_greedy_ld_prune(R, ld_threshold, var_MAF, prefer_keep)
+    keep <- var_idx[setdiff(seq_along(var_idx), to_remove)]
+  }
+  if (remove_lindep && length(keep) > 1) {
+    qr_result <- qr(G[, keep, drop = FALSE])
+    keep <- keep[sort(qr_result$pivot[seq_len(qr_result$rank)])]
+  }
+  keep
+}
+
+# Genotype-like matrices with LD blocks: base rare columns, near-copies with a
+# few flipped entries, exact duplicates, and a constant column.
+.ld_fixture <- function(seed, n = 300L) {
+  set.seed(seed)
+  base <- replicate(12, rbinom(n, 2, runif(1, 0.01, 0.3)))
+  near <- base[, 1:8]
+  for (j in 1:8) { k <- sample(n, 3); near[k, j] <- pmin(2, near[k, j] + 1) }
+  G <- cbind(base, near, base[, 3], base[, 3], base[, 5] + 0 * base[, 1],
+             matrix(0, n, 1), replicate(6, rbinom(n, 2, 0.05)))
+  storage.mode(G) <- "double"
+  G
+}
+
+test_that("filter_variants_ld selects the same columns as the reference implementation", {
+  for (seed in 1:6) {
+    G <- .ld_fixture(seed)
+    for (thr in c(0.5, 0.8, 0.95)) {
+      for (pk in c("lower_maf", "higher_maf", "first")) {
+        for (lindep in c(TRUE, FALSE)) {
+          expect_identical(
+            filter_variants_ld(G, ld_threshold = thr, remove_lindep = lindep,
+                               prefer_keep = pk),
+            .ref_filter_variants_ld(G, ld_threshold = thr, remove_lindep = lindep,
+                                    prefer_keep = pk),
+            info = sprintf("seed %d thr %.2f %s lindep %s", seed, thr, pk, lindep))
+        }
+      }
+    }
+  }
+})
+
+# Rare-variant dosage matrices with exact dependencies placed across the
+# 256-column blocks and 16-column sub-blocks of .independent_columns(): sums of
+# earlier columns, a burden-like count column, and 20 samples carrying nothing
+# (zero rows). ld_threshold = 1 leaves the LD prune with nothing to remove, so
+# the linear-dependence step sees every column.
+.lindep_fixture <- function(n, seed) {
+  set.seed(seed)
+  base <- replicate(700, rbinom(n, 2, runif(1, 0.005, 0.05)))
+  G <- base
+  for (j in c(2L, 15L, 16L, 17L, 255L, 256L, 257L, 258L, 400L, 511L, 512L, 513L, 700L)) {
+    G[, j] <- base[, j - 1L] + base[, max(1L, j - 7L)]
+  }
+  G[, 300L] <- rowSums(base[, 290:299])
+  G[sample(n, 20), ] <- 0
+  G <- G[, colSums(G) > 0, drop = FALSE]
+  storage.mode(G) <- "double"
+  G
+}
+
+test_that("filter_variants_ld linear-dependence step keeps the columns qr() keeps across block boundaries", {
+  for (seed in 1:3) {
+    G <- .lindep_fixture(1000L, seed)            # more rows than columns: no rank bound
+    keep <- filter_variants_ld(G, ld_threshold = 1, remove_lindep = TRUE)
+    expect_identical(keep, .ref_filter_variants_ld(G, ld_threshold = 1, remove_lindep = TRUE),
+                     info = sprintf("seed %d", seed))
+    expect_lt(length(keep), ncol(G))
+    expect_equal(qr(G[, keep])$rank, length(keep))
+  }
+})
+
+test_that("filter_variants_ld linear-dependence step keeps the columns qr() keeps at the rank bound", {
+  for (seed in 4:6) {
+    G <- .lindep_fixture(300L, seed)             # 700 columns, at most 280 nonzero rows
+    keep <- filter_variants_ld(G, ld_threshold = 1, remove_lindep = TRUE)
+    expect_identical(keep, .ref_filter_variants_ld(G, ld_threshold = 1, remove_lindep = TRUE),
+                     info = sprintf("seed %d", seed))
+    expect_lte(length(keep), sum(rowSums(G != 0) > 0))
+  }
+})
+
+test_that("filter_variants_ld remove_lindep = TRUE refuses missing values", {
+  G <- .ld_fixture(8)
+  G[sample(length(G), 5)] <- NA
+  expect_error(filter_variants_ld(G, ld_threshold = 0.8, remove_lindep = TRUE),
+               "without missing values")
+})
+
+test_that("filter_variants_ld with missing values keeps the pairwise path and the reference result", {
+  G <- .ld_fixture(7)
+  G[sample(length(G), 40)] <- NA
+  expect_identical(filter_variants_ld(G, ld_threshold = 0.8, remove_lindep = FALSE),
+                   .ref_filter_variants_ld(G, ld_threshold = 0.8, remove_lindep = FALSE))
+})
+
+test_that(".greedy_ld_prune removes the same variants as the reference on a dense LD matrix", {
+  set.seed(99)
+  n <- 150; p <- 40
+  G <- replicate(p, rbinom(n, 2, 0.2))
+  G[, 2] <- G[, 1]; G[, 3] <- G[, 1]; G[, 10] <- G[, 9]
+  R <- cor(G)
+  MAF <- pmin(colMeans(G) / 2, 1 - colMeans(G) / 2)
+  for (thr in c(0.2, 0.5, 0.9)) {
+    for (pk in c("lower_maf", "higher_maf", "first")) {
+      expect_identical(GLOWr:::.greedy_ld_prune(R, thr, MAF, pk),
+                       .ref_greedy_ld_prune(R, thr, MAF, pk),
+                       info = sprintf("thr %.1f %s", thr, pk))
+    }
+  }
+})

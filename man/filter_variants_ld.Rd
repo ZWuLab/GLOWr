@@ -19,8 +19,12 @@ filter_variants_ld(
 
 \item{remove_lindep}{Logical. If TRUE (default), also remove columns
 that are exact linear combinations of other columns after LD pruning.
-Uses QR decomposition. Prevents singularity in downstream Z-score
-computation and correlation matrices.}
+The columns are visited in order and a column is dropped when its
+residual after projection onto the kept columns before it has norm
+below \code{1e-07} times its own norm, which is the rule of \code{qr()}
+with its default tolerance. Prevents singularity in downstream Z-score
+computation and correlation matrices. Requires a matrix without
+missing values.}
 
 \item{prefer_keep}{Character controlling which variant to keep when
 breaking ties in LD pruning. One of:
@@ -36,7 +40,27 @@ Integer vector of column indices to KEEP.
 \description{
 Identifies pairs of variants with absolute correlation exceeding a
 threshold and removes one from each pair using a greedy algorithm.
-Optionally also removes linearly dependent columns via QR decomposition.
+Optionally also removes linearly dependent columns, in column order.
+}
+\details{
+Cost: for \eqn{N} samples and \eqn{m} variable columns, the correlation is
+one BLAS cross-product, \eqn{O(N m^2)}, on the centered and scaled columns
+(the two-pass column variance, equal to \code{var()}, decides the
+zero-variance exclusion and scales the columns). The greedy prune thresholds
+the correlation once and keeps each variant's count of above-threshold
+partners up to date as variants are removed, \eqn{O(m^2 + k m)} for
+\eqn{k} removals. Memory holds the \eqn{m \times m} correlation and its
+logical threshold mask (about 130 MB and 65 MB at \eqn{m = 4000}). A matrix
+with missing values takes the pairwise-complete \code{cor()} path instead,
+which is far slower; \code{\link{extract_variant_set}} imputes before this
+step, so the scan never does.
+
+The linear-dependence step is a blocked in-order Gram-Schmidt applied twice
+(\code{.independent_columns()}), \eqn{O(N r m)} in BLAS calls for \eqn{r}
+kept columns among the \eqn{m} visited, and it stops once \eqn{r} reaches
+the number of rows with a nonzero entry. It keeps the columns that
+LINPACK \code{qr()} keeps, which shifted every remaining column once per
+dropped column and so dominated genes with more variants than samples.
 }
 \examples{
 set.seed(42)

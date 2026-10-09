@@ -502,7 +502,26 @@ getZ_marg_score <- function(G, X = NULL, Y = NULL, trait = "binary", null_model 
 #'     when effects are fixed (including H0), given X and G fixed.}
 #'   \item{s0}{Numeric scalar equal to 1 (dispersion parameter for binary traits with
 #'     canonical logistic link).}
+#'   \item{n_spa_fallback}{Integer: the number of columns for which SPAtest
+#'     returned no p-value and the standard score Z was used instead (see
+#'     Details). 0 in the usual case.}
 #' }
+#'
+#' @section The SPA fallback:
+#' \code{SPAtest::ScoreTest_SPA()} skips a column when
+#' \code{min(sum(g), sum(2 - g))} is below \code{minmac}, a guard written for
+#' dosages in \eqn{[0, 2]}. A collapsed burden column (the row sum of many
+#' ultra-rare variants, see \code{\link{collapse_rare_variants}}) whose mean
+#' exceeds 1 has \code{sum(2 - g) < 0} and is skipped even with the
+#' \code{minmac = 0} passed here, so its p-value comes back NA. For such a
+#' column SPAtest's own computation, past the guard, uses the normal
+#' approximation, because the standardized score is far below the cutoff at
+#' which the saddlepoint starts; the standard score Z,
+#' \eqn{Z_j = S_j / \sqrt{M_{s,jj}}}, is therefore the value SPA would have
+#' given. That Z is used for every column SPAtest returned NA for, a warning
+#' states how many, and the count is returned as \code{n_spa_fallback}. This
+#' matches the practice of the GLOW methodology paper, which applied SPA to
+#' the non-collapsed variants only.
 #'
 #' @examples
 #' # Example 1: Balanced case-control with common and rare variants
@@ -717,6 +736,25 @@ getZ_marg_score_binary_SPA <- function(G, X = NULL, Y = NULL, null_model = NULL)
   # Z = Phi^(-1)(1 - p/2) * sign(score); degenerate variants stay NA.
   Zscores_spa <- qnorm(pval_spa / 2, lower.tail = FALSE) * sign(score)
 
+  # Step 3b: the SPA fallback. A column SPAtest was given and returned NA for
+  # was skipped by its MAC guard min(sum(g), sum(2 - g)) >= minmac, which
+  # assumes dosages in [0, 2]: a collapsed burden column with mean > 1 has
+  # sum(2 - g) < 0. Past the guard SPAtest would use the normal approximation
+  # for such a column, so its value is the standard score Z, S_j / sqrt(v_j)
+  # with v_j = diag(GHG) the adjusted score variance held above (the Z that
+  # getZ_marg_score() computes for a binary trait). Degenerate columns (not
+  # sent to SPAtest) keep their NA.
+  spa_na <- ok_var & is.na(pval_spa)
+  n_spa_fallback <- sum(spa_na)
+  if (n_spa_fallback > 0L) {
+    Zscores_spa[spa_na] <- score[spa_na] / sqrt(var_adj[spa_na])
+    warning(sprintf(
+      paste0("getZ_marg_score_binary_SPA: SPA returned NA for %d of %d column(s) ",
+             "(a dosage mean above 1, as for a collapsed burden column); the ",
+             "standard score Z is used for them."),
+      n_spa_fallback, n_var))
+  }
+
   # Step 4: Correlation matrix. Degenerate variants have zero variance, so their
   # correlations are undefined: report them as NA rather than the NaN (with a
   # "non-positive diag" warning) that cov2cor() would produce. cov2cor() on the
@@ -733,7 +771,8 @@ getZ_marg_score_binary_SPA <- function(G, X = NULL, Y = NULL, null_model = NULL)
     scores = score,
     M_Z = M,
     M_s = GHG,
-    s0 = s0
+    s0 = s0,
+    n_spa_fallback = as.integer(n_spa_fallback)
   ))
 }
 

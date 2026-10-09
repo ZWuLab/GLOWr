@@ -10,6 +10,10 @@
 #' - Output structure validation
 #'
 #' File Log (reverse chronological order):
+#' - 2026-10-09: Updated by Claude Code (Fable 5.1), prompted by ZWu. The SPA fallback
+#'   test (a collapsed burden column with dosage mean above 1 gets the standard Z,
+#'   a warning and the count n_spa_fallback); the name checks include the new field;
+#'   the type-conversion test uses dosage-valued G.
 #' - 2026-06-19: Modified by Claude Code (Opus 4.8 / 1M ctx), prompted by ZWu.
 #'   Added Test 7b: a deterministic regression test that a zero-variance
 #'   (monomorphic) variant is reported as NA with an informative warning rather
@@ -52,7 +56,7 @@ test_that("getZ_marg_score_binary_SPA works with balanced binary trait", {
 
   # Check output structure
   expect_type(result, "list")
-  expect_named(result, c("Zscores", "scores", "M_Z", "M_s", "s0"))
+  expect_named(result, c("Zscores", "scores", "M_Z", "M_s", "s0", "n_spa_fallback"))
 
   # Check dimensions
   p <- ncol(G)
@@ -402,7 +406,10 @@ test_that("getZ_marg_score_binary_SPA handles matrix type conversions", {
   n <- 100
   p <- 5
 
-  G <- matrix(rnorm(n * p), n, p)
+  # Dosage-valued G (a Gaussian G, used before 2026-10-09, has columns whose
+  # sum is negative; SPAtest skips those and the fallback warns, which is not
+  # what this type-conversion test is about).
+  G <- matrix(as.numeric(rbinom(n * p, 2, 0.3)), n, p)
   X <- matrix(rnorm(n * 2), n, 2)
   Y <- sample(c(0, 1), n, replace = TRUE)
 
@@ -590,6 +597,48 @@ test_that("Output structure matches legacy implementation", {
   expect_true(is.numeric(result$s0))
   expect_length(result$s0, 1)
 
-  # No extra elements
-  expect_setequal(names(result), c("Zscores", "scores", "M_Z", "M_s", "s0"))
+  # No extra elements (n_spa_fallback added 2026-10-09 with the SPA fallback)
+  expect_setequal(names(result), c("Zscores", "scores", "M_Z", "M_s", "s0",
+                                   "n_spa_fallback"))
+  expect_equal(result$n_spa_fallback, 0L)
+})
+
+# ==============================================================================
+# 2026-10-09: the SPA fallback for a collapsed burden column (dosage mean > 1)
+# ==============================================================================
+test_that("a burden column with dosage mean above 1 gets the standard Z, a warning and a count", {
+  set.seed(20261009)
+  n <- 600
+  X <- cbind(rnorm(n), rbinom(n, 1, 0.5))
+  Y <- rbinom(n, 1, 0.15)                      # unbalanced, as in a case-control cohort
+  G_rare <- cbind(rbinom(n, 2, 0.03), rbinom(n, 2, 0.05))
+  burden <- rowSums(replicate(80, rbinom(n, 2, 0.015)))   # mean about 2.4 > 1
+  expect_true(mean(burden) > 1)
+  G <- cbind(G_rare, burden)
+  storage.mode(G) <- "double"
+
+  # SPAtest's guard skips the burden column: min(sum(g), sum(2 - g)) < 0.
+  expect_true(sum(2 - burden) < 0)
+
+  expect_warning(
+    res <- getZ_marg_score_binary_SPA(G, X, Y),
+    "SPA returned NA for 1 of 3 column")
+  expect_equal(res$n_spa_fallback, 1L)
+  expect_false(anyNA(res$Zscores))
+
+  # The fallback value is the standard score Z of that column.
+  std <- getZ_marg_score(G, X, Y, trait = "binary")
+  expect_equal(res$Zscores[3], std$Zscores[3], tolerance = 1e-8)
+
+  # The other columns are what SPA gives without the burden column present
+  # (the "BE" cutoff is per variant).
+  res2 <- getZ_marg_score_binary_SPA(G_rare, X, Y)
+  expect_equal(res$Zscores[1:2], res2$Zscores, tolerance = 1e-10)
+  expect_equal(res2$n_spa_fallback, 0L)
+
+  # The downstream test consumes it (no NA stop).
+  stats <- suppressWarnings(compute_score_stats(G, fit_null_model(X, Y, "binary"),
+                                                use_spa = TRUE, verbose = 0))
+  out <- glow_test(stats, B = c(0.5, 0.6, 0.9), PI = c(0.3, 0.4, 0.5), verbose = 0)
+  expect_s3_class(out, "glow_test_result")
 })

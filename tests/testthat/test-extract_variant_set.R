@@ -605,3 +605,75 @@ test_that("a region whose QC values are all missing returns NULL, not an error",
   expect_null(extract_variant_set(gds_path, region = list(chr = "22", start = 1L, end = 1000L),
                                   filter_spec = spec, verbose = 0))
 })
+
+
+# ==============================================================================
+# The variant index (2026-10-09): build_variant_index(), the variant_index
+# argument, count_index_records()
+# ==============================================================================
+
+test_that("build_variant_index describes the fixture file", {
+  idx <- build_variant_index(test_agds_path)
+  expect_s3_class(idx, "glow_variant_index")
+  expect_equal(attr(idx, "n_variants"), 125L)
+  expect_equal(names(idx), "22")
+  expect_equal(length(idx[["22"]]$pos), 125L)
+  expect_equal(idx[["22"]]$sel, seq_len(125L))
+  expect_true(idx[["22"]]$sorted)
+  # An open handle with a filter set gives the same index (the filter is reset).
+  gds <- SeqArray::seqOpen(test_agds_path, readonly = TRUE)
+  on.exit(SeqArray::seqClose(gds))
+  SeqArray::seqSetFilter(gds, variant.id = 1:5, verbose = FALSE)
+  idx2 <- build_variant_index(gds)
+  expect_identical(idx, idx2)
+})
+
+test_that("extract_variant_set with the index equals the call without it", {
+  idx  <- build_variant_index(test_agds_path)
+  spec <- variant_filter(rare_maf_cutoff = 0.5, variant_type = "SNV",
+                         min_mac = 1L, min_variants = 1L)
+  gds <- SeqArray::seqOpen(test_agds_path, readonly = TRUE)
+  on.exit(SeqArray::seqClose(gds))
+  sids <- rev(SeqArray::seqGetData(gds, "sample.id"))   # a reordered subset path
+  regions <- list(
+    list(chr = "22", start = 1000L,  end = 5000L,  label = "GENE_A"),
+    list(chr = "22", start = 10000L, end = 15000L, label = "GENE_B"),
+    list(chr = "22", start = 20000L, end = 25000L, label = "GENE_C"),
+    list(chr = "22", start = 30000L, end = 32000L, label = "GENE_D"),
+    list(chr = "22", start = 1000L,  end = 1000L,  label = "one"),
+    list(chr = "22", start = 1, end = 50000L, label = "all"))
+  for (r in regions) {
+    a <- extract_variant_set(gds, r, spec, sample_id = sids,
+                             annotation_names = c("cadd_phred", "linsight"),
+                             verbose = 0)
+    b <- extract_variant_set(gds, r, spec, sample_id = sids,
+                             annotation_names = c("cadd_phred", "linsight"),
+                             variant_index = idx, verbose = 0)
+    expect_identical(a, b, info = r$label)
+    # and the count of the index equals the region's record count
+    expect_equal(count_index_records(idx, r$chr, r$start, r$end),
+                 a$n_total_in_region, info = r$label)
+  }
+  # Empty region and an absent chromosome through the index.
+  expect_null(extract_variant_set(gds, list(chr = "22", start = 999999L, end = 999999L),
+                                  spec, variant_index = idx, verbose = 0))
+  expect_null(extract_variant_set(gds, list(chr = "1", start = 1000L, end = 5000L),
+                                  spec, variant_index = idx, verbose = 0))
+  expect_equal(count_index_records(idx, "1", 1000L, 5000L), 0L)
+  expect_error(extract_variant_set(gds, regions[[1]], spec, variant_index = list()),
+               "glow_variant_index")
+})
+
+test_that("count_index_records is vectorized and agrees with a mask", {
+  idx <- build_variant_index(test_agds_path)
+  pos <- idx[["22"]]$pos
+  starts <- c(1000L, 3000L, 10000L, 40000L, 60000L)
+  ends   <- c(5000L, 3000L, 15000L, 41000L, 70000L)
+  n <- count_index_records(idx, "22", starts, ends)
+  expect_equal(n, vapply(seq_along(starts), function(i)
+    sum(pos >= starts[i] & pos <= ends[i]), integer(1)))
+  # An unsorted chromosome takes the mask path and gives the same counts.
+  idx_u <- idx
+  idx_u[["22"]]$sorted <- FALSE
+  expect_equal(count_index_records(idx_u, "22", starts, ends), n)
+})

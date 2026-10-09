@@ -14,6 +14,7 @@
 #
 # INTERNAL HELPERS:
 #   - .greedy_ld_prune()        Greedy LD pruning with MAF-based tie-breaking
+#   - .independent_columns()   In-order linear-dependence check (replaces qr())
 #   - .group_rare_variants()    Group rare indices into chunks
 #   - .group_rare_spatial()     Group rare variants between adjacent common variants
 #   - .build_collapsed_result() Build collapsed genotype matrix and mapping
@@ -63,15 +64,19 @@ flip_alleles <- function(G) {
 #'
 #' Identifies pairs of variants with absolute correlation exceeding a
 #' threshold and removes one from each pair using a greedy algorithm.
-#' Optionally also removes linearly dependent columns via QR decomposition.
+#' Optionally also removes linearly dependent columns, in column order.
 #'
 #' @param G Numeric matrix (n x p) of genotype dosage.
 #' @param ld_threshold Numeric correlation threshold. Pairs with
 #'   |r| > ld_threshold are considered redundant. Default 0.9.
 #' @param remove_lindep Logical. If TRUE (default), also remove columns
 #'   that are exact linear combinations of other columns after LD pruning.
-#'   Uses QR decomposition. Prevents singularity in downstream Z-score
-#'   computation and correlation matrices.
+#'   The columns are visited in order and a column is dropped when its
+#'   residual after projection onto the kept columns before it has norm
+#'   below \code{1e-07} times its own norm, which is the rule of \code{qr()}
+#'   with its default tolerance. Prevents singularity in downstream Z-score
+#'   computation and correlation matrices. Requires a matrix without
+#'   missing values.
 #' @param prefer_keep Character controlling which variant to keep when
 #'   breaking ties in LD pruning. One of:
 #'   \itemize{
@@ -81,6 +86,26 @@ flip_alleles <- function(G) {
 #'   }
 #'
 #' @return Integer vector of column indices to KEEP.
+#'
+#' @details
+#' Cost: for \eqn{N} samples and \eqn{m} variable columns, the correlation is
+#' one BLAS cross-product, \eqn{O(N m^2)}, on the centered and scaled columns
+#' (the two-pass column variance, equal to \code{var()}, decides the
+#' zero-variance exclusion and scales the columns). The greedy prune thresholds
+#' the correlation once and keeps each variant's count of above-threshold
+#' partners up to date as variants are removed, \eqn{O(m^2 + k m)} for
+#' \eqn{k} removals. Memory holds the \eqn{m \times m} correlation and its
+#' logical threshold mask (about 130 MB and 65 MB at \eqn{m = 4000}). A matrix
+#' with missing values takes the pairwise-complete \code{cor()} path instead,
+#' which is far slower; \code{\link{extract_variant_set}} imputes before this
+#' step, so the scan never does.
+#'
+#' The linear-dependence step is a blocked in-order Gram-Schmidt applied twice
+#' (\code{.independent_columns()}), \eqn{O(N r m)} in BLAS calls for \eqn{r}
+#' kept columns among the \eqn{m} visited, and it stops once \eqn{r} reaches
+#' the number of rows with a nonzero entry. It keeps the columns that
+#' LINPACK \code{qr()} keeps, which shifted every remaining column once per
+#' dropped column and so dominated genes with more variants than samples.
 #'
 #' @examples
 #' set.seed(42)
@@ -104,6 +129,7 @@ filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
   prefer_keep <- match.arg(prefer_keep, c("lower_maf", "higher_maf", "first"))
 
   p <- ncol(G)
+  n <- nrow(G)
   if (p <= 1) return(seq_len(p))
 
   # Compute MAF for tie-breaking (needed for "lower_maf" and "higher_maf")
@@ -114,8 +140,19 @@ filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
     NULL
   }
 
-  # Handle zero-variance columns (monomorphic after imputation)
-  col_vars <- apply(G, 2, var, na.rm = TRUE)
+  has_na <- anyNA(G)
+
+  # Handle zero-variance columns (monomorphic after imputation). The two-pass
+  # column variance from the centered matrix equals var(); a constant column
+  # gives exactly 0 either way. The centered matrix is reused below for the
+  # correlation, so the NA-free path centers once.
+  if (has_na) {
+    col_vars <- apply(G, 2, var, na.rm = TRUE)
+  } else {
+    col_means <- colMeans(G)
+    Gc <- G - rep(col_means, each = n)     # column-major: each mean repeated n times
+    col_vars <- colSums(Gc * Gc) / (n - 1)
+  }
   zero_var <- col_vars < .Machine$double.eps
 
   if (all(zero_var)) return(integer(0))
@@ -125,26 +162,42 @@ filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
   if (length(var_idx) <= 1) {
     keep <- var_idx
   } else {
-    R <- cor(G[, var_idx, drop = FALSE], use = "pairwise.complete.obs")
+    if (has_na) {
+      # Missing values: the pairwise-complete path (slow, kept for direct callers
+      # that did not impute). The scan never reaches it.
+      R <- cor(G[, var_idx, drop = FALSE], use = "pairwise.complete.obs")
+    } else {
+      # Correlation as the cross-product of the standardized columns,
+      # Z_ij = (G_ij - mean_j) / (s_j * sqrt(n - 1)), so R = t(Z) %*% Z. One BLAS
+      # call; equals cor() to the rounding of the summation order.
+      Z <- Gc[, var_idx, drop = FALSE]
+      rm(Gc)
+      Z <- Z / rep(sqrt(col_vars[var_idx] * (n - 1)), each = n)
+      R <- crossprod(Z)
+      rm(Z)
+    }
 
     # Greedy removal with MAF-based tie-breaking
     # (replaces caret::findCorrelation)
     var_MAF <- if (!is.null(MAF)) MAF[var_idx] else NULL
     to_remove <- .greedy_ld_prune(R, ld_threshold, var_MAF, prefer_keep)
+    rm(R)
 
     keep_among_var <- setdiff(seq_along(var_idx), to_remove)
     keep <- var_idx[keep_among_var]
   }
 
-  # Linear dependence removal via QR decomposition
+  # Linear dependence removal, in column order
   # After LD pruning, some columns may still be exact linear combinations
-  # of others (e.g., after ultra-rare collapsing). QR decomposition
-  # identifies the maximal linearly independent subset.
+  # of others (e.g., after ultra-rare collapsing). .independent_columns()
+  # keeps the first maximal linearly independent subset in column order,
+  # the set LINPACK qr() returned here before (same rule, same tolerance).
   if (remove_lindep && length(keep) > 1) {
     G_sub <- G[, keep, drop = FALSE]
-    qr_result <- qr(G_sub)
-    lindep_keep <- qr_result$pivot[seq_len(qr_result$rank)]
-    keep <- keep[sort(lindep_keep)]
+    if (anyNA(G_sub)) {
+      stop("filter_variants_ld: remove_lindep = TRUE requires a matrix without missing values")
+    }
+    keep <- keep[.independent_columns(G_sub)]
   }
 
   keep
@@ -297,6 +350,14 @@ aggregate_B_PI <- function(B, PI, collapse_result) {
 #' - "higher_maf": remove the one with lower MAF (keep more common)
 #' - "first": remove the one with higher index (keep earlier)
 #'
+#' The adjacency (|r| above the threshold, diagonal FALSE) is formed once. Each
+#' variant's count of partners among the variants not yet removed is kept up to
+#' date: removing variant w zeroes its own count and decrements the count of
+#' every non-removed partner of w. That count equals the column sum of the
+#' adjacency with the removed rows and columns zeroed, which is what a full
+#' recomputation per removal gave, so the candidate set and the choice at every
+#' step are the same, at O(m^2 + k m) instead of O(k m^2).
+#'
 #' @param R Correlation matrix (p x p).
 #' @param threshold Numeric LD threshold.
 #' @param MAF Numeric vector of MAFs (length p), or NULL.
@@ -306,20 +367,16 @@ aggregate_B_PI <- function(B, PI, collapse_result) {
 #' @noRd
 .greedy_ld_prune <- function(R, threshold, MAF = NULL, prefer_keep = "first") {
   p <- ncol(R)
-  diag(R) <- 0  # ignore self-correlation
+  high_ld <- abs(R) > threshold   # the adjacency, thresholded once
+  diag(high_ld) <- FALSE          # ignore self-correlation
+  n_partners <- colSums(high_ld)  # partners among the not-yet-removed variants
   removed <- logical(p)
 
   repeat {
-    # Count high-LD pairs per variant (among non-removed)
-    high_ld <- abs(R) > threshold
-    high_ld[removed, ] <- FALSE
-    high_ld[, removed] <- FALSE
-
-    n_partners <- colSums(high_ld)
-    if (max(n_partners) == 0) break
-
-    # Find candidates with the most high-LD partners
     max_partners <- max(n_partners)
+    if (max_partners == 0) break
+
+    # Find candidates with the most high-LD partners (removed variants hold 0)
     candidates <- which(n_partners == max_partners)
 
     # Tie-breaking: decide which candidate to remove
@@ -337,9 +394,100 @@ aggregate_B_PI <- function(B, PI, collapse_result) {
     }
 
     removed[worst] <- TRUE
+    # The removed variant leaves every partner's count; its own count goes to 0.
+    partners <- which(high_ld[, worst] & !removed)
+    n_partners[partners] <- n_partners[partners] - 1L
+    n_partners[worst] <- 0L
   }
 
   which(removed)
+}
+
+
+#' Linearly Independent Columns, in Column Order
+#'
+#' Returns the indices of the columns of \code{G} that LINPACK \code{qr()} with
+#' its limited column pivoting keeps: the columns are visited in order, and
+#' column \eqn{j} is kept when its residual after projection onto the kept
+#' columns before it has norm at least \code{tol} times the column's own norm.
+#' The projection is a blocked classical Gram-Schmidt applied twice (CGS2):
+#' a block of 256 columns is projected onto the kept basis in BLAS level-3
+#' calls, then sub-blocks of 16 onto the block's own kept columns, then each
+#' column onto its sub-block's, so the residual norms are accurate to rounding.
+#' Rows with no nonzero entry are dropped first, which changes no residual, and
+#' the visit stops once the kept count reaches the remaining row count (the
+#' rank bound), after which every column is dependent.
+#'
+#' \code{qr()} applies the same rule, but cycles each dropped column to the
+#' end by shifting every remaining column one slot, a cost of order
+#' \eqn{N \times} dropped \eqn{\times} remaining that reached 367 s on a gene
+#' with 14,038 columns and 3,195 kept at \eqn{N = 3{,}202}. Here the cost is
+#' \eqn{O(N r m)} for \eqn{r} kept columns among the \eqn{m} visited.
+#'
+#' Both procedures estimate the same residual norm to rounding error, so they
+#' differ only for a column whose residual sits within rounding of
+#' \code{tol} times its norm. Integer dosage columns are either exactly
+#' dependent (residual at machine precision) or far from it.
+#'
+#' @param G Numeric matrix without missing values whose columns all have a
+#'   nonzero norm (\code{filter_variants_ld()} excludes zero-variance columns
+#'   before this step). A zero column, should one arrive, is dropped.
+#' @param tol Relative tolerance, \code{qr()}'s default \code{1e-07}.
+#'
+#' @return Integer vector of the kept column indices, increasing.
+#'
+#' @keywords internal
+#' @noRd
+.independent_columns <- function(G, tol = 1e-7) {
+  block <- 256L   # columns projected onto the kept basis in one BLAS call
+  sub <- 16L      # columns projected onto the block's kept columns in one call
+  norm0 <- sqrt(colSums(G * G))          # the original column norms (qr()'s reference)
+  nz <- rowSums(G != 0) > 0
+  if (!all(nz)) G <- G[nz, , drop = FALSE]   # zero rows carry no dependence information
+  n <- nrow(G); m <- ncol(G)
+  keep <- logical(m)
+  if (n == 0L || m == 0L) return(integer(0))
+
+  # CGS2 against a list of orthonormal blocks: two passes keep the residual
+  # orthogonal to the basis to rounding, whatever the conditioning of G.
+  project <- function(B, blocks) {
+    if (length(blocks)) for (pass in 1:2) for (Qk in blocks) B <- B - Qk %*% crossprod(Qk, B)
+    B
+  }
+
+  basis <- list()   # orthonormal blocks of the kept columns, in visiting order
+  r <- 0L           # number of kept columns so far
+  start <- 1L
+  while (start <= m && r < n) {         # r == n: rank bound, the rest is dependent
+    idx <- start:min(start + block - 1L, m)
+    B <- project(G[, idx, drop = FALSE], basis)
+    inblock <- list(); nb <- 0L; s0 <- 1L
+    while (s0 <= length(idx) && r + nb < n) {
+      sidx <- s0:min(s0 + sub - 1L, length(idx))
+      Bs <- project(B[, sidx, drop = FALSE], inblock)
+      qs <- NULL                         # kept columns of this sub-block, orthonormal
+      for (jj in seq_along(sidx)) {      # in order within the sub-block
+        v <- Bs[, jj]
+        if (!is.null(qs)) for (pass in 1:2) v <- v - qs %*% crossprod(qs, v)
+        nv <- sqrt(sum(v * v))
+        j <- idx[sidx[jj]]
+        if (norm0[j] > 0 && nv >= tol * norm0[j]) {   # the test of LINPACK dqrdc2
+          qs <- cbind(qs, v / nv)
+          keep[j] <- TRUE
+          nb <- nb + 1L
+          if (r + nb >= n) break
+        }
+      }
+      if (!is.null(qs)) inblock[[length(inblock) + 1L]] <- qs
+      s0 <- sidx[length(sidx)] + 1L
+    }
+    if (nb > 0L) {
+      basis[[length(basis) + 1L]] <- do.call(cbind, inblock)
+      r <- r + nb
+    }
+    start <- idx[length(idx)] + 1L
+  }
+  which(keep)
 }
 
 

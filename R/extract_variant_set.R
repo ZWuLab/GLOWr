@@ -10,11 +10,14 @@
 #
 # EXPORTED FUNCTIONS:
 #   - extract_variant_set()           Extract filtered variant set from GDS
+#   - build_variant_index()           Per-chromosome position index of a GDS
+#   - count_index_records()           Records of an index inside genomic spans
 #   - compute_annotation_medians()    Compute chromosome-wide annotation medians
 #
 # INTERNAL HELPERS:
 #   - .select_variants_by_spec()       Apply filter_spec to a candidate pool
 #                                      (shared by the two exported functions)
+#   - .index_region_lookup()           Records of one region from the index
 #   - .normalize_region()              Normalize region input
 #   - .evaluate_annotation_clauses()   Evaluate DNF annotation filter
 #   - .resolve_annotation_path()       Map annotation name to GDS path
@@ -52,10 +55,26 @@
 #'   AF <= 0.5, or 2 when AF > 0.5; in both cases the imputed value assumes
 #'   the individual carries zero copies of the minor allele. This matches
 #'   the legacy STAARpipeline \code{matrix_flip_minor()} behavior.
+#' @param variant_index A \code{glow_variant_index} from
+#'   \code{\link{build_variant_index}} for this GDS, or NULL (default). With an
+#'   index the region's records are found by binary search on the index and
+#'   the GDS filter is set by file position, so a scan over many regions does
+#'   not re-read the chromosome's variant table for each one. Without it the
+#'   function builds an index for this call, which costs one read of the
+#'   chromosome, as before. The selection and the returned object are the
+#'   same either way.
 #' @param verbose Integer verbosity level.
 #'
 #' @return A \code{glow_variant_set} S3 object, or NULL if the region
 #'   has fewer than \code{filter_spec$min_variants} qualifying variants.
+#'
+#' @details
+#' Cost: with a prebuilt index, locating a region costs two binary searches on
+#' the chromosome's positions, so the per-region cost is set by the filtered
+#' records of the region alone. Without an index, each call reads the
+#' chromosome's variant table once (linear in the chromosome's record count).
+#' The orchestration layer (\code{GLOWpipeline::glow_scan_chunk}) builds the
+#' index once per chunk and passes it to every region.
 #'
 #' @examples
 #' \dontrun{
@@ -85,6 +104,7 @@ extract_variant_set <- function(gds,
                                  Annotation_dir = "annotation/info/FunctionalAnnotation",
                                  Annotation_name_catalog = NULL,
                                  impute_method = "mean",
+                                 variant_index = NULL,
                                  verbose = 1) {
 
   if (!requireNamespace("SeqArray", quietly = TRUE)) {
@@ -109,24 +129,31 @@ extract_variant_set <- function(gds,
                                     envir = asNamespace("GLOWr"))
   }
 
-  # ---- 4. Read chromosome-level position and variant.id ----
+  # ---- 4. The variant index: build one for this call unless supplied ----
+  # The index holds the chromosome's positions, ids and file positions, read
+  # once. A scan passes one index to every region; a direct call pays the read
+  # here, which is what the function did before the index existed.
+  if (is.null(variant_index)) {
+    variant_index <- build_variant_index(gds)
+  } else if (!inherits(variant_index, "glow_variant_index")) {
+    stop("`variant_index` must be a glow_variant_index from build_variant_index(), ",
+         "or NULL.")
+  }
+  # Clear any filter a previous call left on the handle, so the filter calls
+  # below start from the whole file (as the chromosome-wide read used to).
   SeqArray::seqResetFilter(gds, verbose = FALSE)
-  all_positions <- SeqArray::seqGetData(gds, "position")
-  all_variant_ids <- SeqArray::seqGetData(gds, "variant.id")
-  all_chr <- SeqArray::seqGetData(gds, "chromosome")
 
-  # ---- 5. Positional filter ----
-  chr_match <- as.character(all_chr) == as.character(region$chr)
-  pos_match <- (all_positions >= region$start) & (all_positions <= region$end)
-  in_region <- chr_match & pos_match
-  n_total_in_region <- sum(in_region)
+  # ---- 5. Positional filter, from the index ----
+  hit <- .index_region_lookup(variant_index, region$chr, region$start, region$end)
+  n_total_in_region <- length(hit$variant_id)
 
   if (n_total_in_region == 0) {
     if (verbose >= 1) message("No variants in region ", region$label)
     return(NULL)
   }
 
-  region_variant_ids <- all_variant_ids[in_region]
+  region_variant_ids <- hit$variant_id
+  region_variant_sel <- hit$sel        # file positions of the same records
 
   # ---- 6. Apply filter spec (QC + type + annotation clauses + MAF/MAC) ----
   # Delegates to .select_variants_by_spec() so per-gene (this function) and
@@ -140,7 +167,8 @@ extract_variant_set <- function(gds,
     Annotation_name_catalog = Annotation_name_catalog,
     impute_method = impute_method,
     return_genotypes = TRUE,
-    reorder_samples = TRUE
+    reorder_samples = TRUE,
+    candidate_variant_sel = region_variant_sel
   )
 
   n_passing <- length(selected$variant_ids)
@@ -163,7 +191,9 @@ extract_variant_set <- function(gds,
   MAC <- selected$MAC
 
   # ---- 7. Build variant_info ----
-  SeqArray::seqSetFilter(gds, variant.id = final_variant_ids, verbose = FALSE)
+  # The filter is set by file position (the index path), which selects the same
+  # records as the id match without scanning the chromosome's id vector.
+  SeqArray::seqSetFilter(gds, variant.sel = selected$variant_sel, verbose = FALSE)
   positions <- SeqArray::seqGetData(gds, "position")
   alleles <- SeqArray::seqGetData(gds, "allele")
   allele_split <- strsplit(alleles, ",")
@@ -215,6 +245,124 @@ extract_variant_set <- function(gds,
     ),
     class = "glow_variant_set"
   )
+}
+
+
+#' Build a Variant Index of a GDS for Fast Region Lookup
+#'
+#' Reads the chromosome, position and variant id of every record of a GDS once
+#' and returns a per-chromosome index. \code{\link{extract_variant_set}} uses
+#' it to find a region's records by binary search on the positions and to set
+#' the GDS filter by file position, instead of re-reading the chromosome's
+#' variant table and matching ids for every region. A scan builds the index
+#' once per open file and passes it to every region.
+#'
+#' @param gds An open \code{SeqVarGDSClass} object or a character file path.
+#'   If a path, the file is opened and closed internally. Any filter set on an
+#'   open handle is reset, since the index describes the whole file.
+#'
+#' @return A \code{glow_variant_index}: a named list with one element per
+#'   chromosome value found in the file. Each element is a list with
+#'   \code{pos} (integer positions in file order), \code{variant_id} (the
+#'   records' ids), \code{sel} (their file positions, 1-based) and
+#'   \code{sorted} (TRUE when the positions are non-decreasing, which enables
+#'   the binary search). The attribute \code{n_variants} is the file's record
+#'   count.
+#'
+#' @details
+#' Cost: one read of the three vectors, linear in the file's record count
+#' (about 0.2 s and 8 MB for a chromosome of one million records). Positions
+#' in a GDS written by \code{SeqArray::seqVCF2GDS} or \code{\link{plink_to_gds}}
+#' are sorted within a chromosome; an unsorted chromosome is still supported,
+#' by a mask over the index instead of the binary search.
+#'
+#' @examples
+#' \dontrun{
+#' gds <- SeqArray::seqOpen("chr22.gds")
+#' idx <- build_variant_index(gds)
+#' vset <- extract_variant_set(gds, list(chr = "22", start = 1.7e7, end = 1.8e7),
+#'                             variant_filter(), variant_index = idx)
+#' SeqArray::seqClose(gds)
+#' }
+#'
+#' @seealso \code{\link{extract_variant_set}}, \code{\link{count_index_records}}
+#' @export
+build_variant_index <- function(gds) {
+  if (!requireNamespace("SeqArray", quietly = TRUE)) {
+    stop("SeqArray package required. Install with: BiocManager::install('SeqArray')")
+  }
+  if (is.character(gds)) {
+    stopifnot(file.exists(gds))
+    # allow.duplicate: a read-only handle beside one the caller may hold open
+    # (the orchestration layer builds the index from the path before a scan).
+    gds <- SeqArray::seqOpen(gds, readonly = TRUE, allow.duplicate = TRUE)
+    on.exit(SeqArray::seqClose(gds), add = TRUE)
+  }
+  SeqArray::seqResetFilter(gds, verbose = FALSE)
+  chr <- as.character(SeqArray::seqGetData(gds, "chromosome"))
+  pos <- as.integer(SeqArray::seqGetData(gds, "position"))
+  vid <- SeqArray::seqGetData(gds, "variant.id")
+  n   <- length(pos)
+
+  # File positions grouped by chromosome value (a per-chromosome file has one
+  # group holding 1..n). Within a group the vectors stay in file order, which
+  # is the order seqGetData() returns records in, so a lookup's ids match the
+  # old logical-mask selection record for record.
+  groups <- split(seq_len(n), chr)
+  index <- lapply(groups, function(sel) {
+    p <- pos[sel]
+    list(pos = p, variant_id = vid[sel], sel = sel, sorted = !is.unsorted(p))
+  })
+  structure(index, class = "glow_variant_index", n_variants = n)
+}
+
+
+#' Count the Records of a Variant Index Inside Genomic Spans
+#'
+#' Counts, for each span, the GDS records whose position lies in
+#' \code{[start, end]} on \code{chr}, from a \code{\link{build_variant_index}}
+#' index. This is the record count before any filter, the quantity the
+#' large-gene segmentation of \code{GLOWpipeline::build_scan_regions} thresholds
+#' on, because it depends only on the file and costs two binary searches per
+#' span.
+#'
+#' @param variant_index A \code{glow_variant_index}.
+#' @param chr Chromosome value(s), recycled to the length of \code{start}.
+#' @param start,end Integer vectors of span bounds (inclusive), same length.
+#'
+#' @return An integer vector of counts, one per span. A chromosome absent from
+#'   the index gives 0.
+#'
+#' @examples
+#' \dontrun{
+#' idx <- build_variant_index("chr22.gds")
+#' genes <- define_regions_gene(chr = 22)
+#' n_rec <- count_index_records(idx, genes$chr, genes$start, genes$end)
+#' }
+#'
+#' @seealso \code{\link{build_variant_index}}
+#' @export
+count_index_records <- function(variant_index, chr, start, end) {
+  if (!inherits(variant_index, "glow_variant_index")) {
+    stop("`variant_index` must be a glow_variant_index from build_variant_index().")
+  }
+  start <- as.integer(start); end <- as.integer(end)
+  stopifnot(length(start) == length(end))
+  chr <- rep_len(as.character(chr), length(start))
+  out <- integer(length(start))
+  for (ch in unique(chr)) {
+    ix <- variant_index[[ch]]
+    if (is.null(ix)) next
+    k <- which(chr == ch)
+    if (isTRUE(ix$sorted)) {
+      # Records with pos <= end minus records with pos < start.
+      out[k] <- findInterval(end[k], ix$pos) - findInterval(start[k] - 1L, ix$pos)
+    } else {
+      out[k] <- vapply(k, function(j) sum(ix$pos >= start[j] & ix$pos <= end[j]),
+                       integer(1))
+    }
+  }
+  out
 }
 
 
@@ -386,9 +534,16 @@ compute_annotation_medians <- function(gds,
 #' @param reorder_samples Logical. Only meaningful when
 #'   \code{return_genotypes = TRUE} and \code{sample_id} is supplied.
 #'   If TRUE, reorders \code{G} rows to match \code{sample_id}.
+#' @param candidate_variant_sel Optional integer vector of the candidates' file
+#'   positions (1-based, aligned with \code{candidate_variant_ids}), from the
+#'   variant index. When supplied, every filter call selects by
+#'   \code{variant.sel} instead of matching ids against the chromosome, which
+#'   selects the same records without a scan of the id vector.
 #'
 #' @return A list with:
 #'   \item{variant_ids}{Final variant IDs passing all filters.}
+#'   \item{variant_sel}{Their file positions when \code{candidate_variant_sel}
+#'     was supplied, else NULL.}
 #'   \item{MAF}{Numeric vector of minor allele frequencies.}
 #'   \item{MAC}{Integer vector of minor allele counts.}
 #'   \item{G}{Imputed dosage matrix if \code{return_genotypes = TRUE},
@@ -404,10 +559,12 @@ compute_annotation_medians <- function(gds,
                                       Annotation_name_catalog,
                                       impute_method = "mean",
                                       return_genotypes = FALSE,
-                                      reorder_samples = FALSE) {
+                                      reorder_samples = FALSE,
+                                      candidate_variant_sel = NULL) {
 
   empty_result <- list(
     variant_ids      = candidate_variant_ids[0],
+    variant_sel      = if (is.null(candidate_variant_sel)) NULL else integer(0),
     MAF              = numeric(0),
     MAC              = integer(0),
     G                = NULL,
@@ -415,15 +572,32 @@ compute_annotation_medians <- function(gds,
   )
 
   if (length(candidate_variant_ids) == 0) return(empty_result)
+  if (!is.null(candidate_variant_sel) &&
+      length(candidate_variant_sel) != length(candidate_variant_ids)) {
+    stop("candidate_variant_sel must align with candidate_variant_ids.")
+  }
+
+  # One filter setter for the three narrowing steps: by file position when the
+  # index supplied it (no id matching), else by id as before. The sample filter
+  # is set in the same call whenever sample_id is given, as before.
+  set_variant_filter <- function(ids, sel) {
+    if (!is.null(sel)) {
+      if (!is.null(sample_id)) {
+        SeqArray::seqSetFilter(gds, variant.sel = sel, sample.id = sample_id,
+                               verbose = FALSE)
+      } else {
+        SeqArray::seqSetFilter(gds, variant.sel = sel, verbose = FALSE)
+      }
+    } else if (!is.null(sample_id)) {
+      SeqArray::seqSetFilter(gds, variant.id = ids, sample.id = sample_id,
+                             verbose = FALSE)
+    } else {
+      SeqArray::seqSetFilter(gds, variant.id = ids, verbose = FALSE)
+    }
+  }
 
   # ---- 1. Set filter to candidate variants + sample subset ----
-  if (!is.null(sample_id)) {
-    SeqArray::seqSetFilter(gds, variant.id = candidate_variant_ids,
-                           sample.id = sample_id, verbose = FALSE)
-  } else {
-    SeqArray::seqSetFilter(gds, variant.id = candidate_variant_ids,
-                           verbose = FALSE)
-  }
+  set_variant_filter(candidate_variant_ids, candidate_variant_sel)
 
   n_candidates <- length(candidate_variant_ids)
 
@@ -466,14 +640,11 @@ compute_annotation_medians <- function(gds,
   if (sum(narrow_pass) == 0) return(empty_result)
 
   narrow_ids <- candidate_variant_ids[narrow_pass]
+  narrow_sel <- if (is.null(candidate_variant_sel)) NULL else
+    candidate_variant_sel[narrow_pass]
 
   # ---- 6. Set filter to narrowed variants (keep sample filter) ----
-  if (!is.null(sample_id)) {
-    SeqArray::seqSetFilter(gds, variant.id = narrow_ids,
-                           sample.id = sample_id, verbose = FALSE)
-  } else {
-    SeqArray::seqSetFilter(gds, variant.id = narrow_ids, verbose = FALSE)
-  }
+  set_variant_filter(narrow_ids, narrow_sel)
 
   # ---- 7. Compute AF via seqAlleleFreq (memory-efficient, no dosage read) ----
   # ref.allele = 1L returns alt allele frequency, matching
@@ -500,18 +671,14 @@ compute_annotation_medians <- function(gds,
   }
 
   final_ids <- narrow_ids[keep]
+  final_sel <- if (is.null(narrow_sel)) NULL else narrow_sel[keep]
   MAF <- MAF[keep]
   MAC <- MAC[keep]
 
   # ---- 10. Set GDS filter to final_ids so the caller sees a consistent
   #         state. Callers that only want medians (return_genotypes = FALSE)
   #         rely on this filter being narrowed to final_ids, not narrow_ids.
-  if (!is.null(sample_id)) {
-    SeqArray::seqSetFilter(gds, variant.id = final_ids,
-                           sample.id = sample_id, verbose = FALSE)
-  } else {
-    SeqArray::seqSetFilter(gds, variant.id = final_ids, verbose = FALSE)
-  }
+  set_variant_filter(final_ids, final_sel)
 
   # ---- 11. Read genotypes only when requested ----
   G <- NULL
@@ -538,11 +705,41 @@ compute_annotation_medians <- function(gds,
 
   list(
     variant_ids        = final_ids,
+    variant_sel        = final_sel,
     MAF                = MAF,
     MAC                = MAC,
     G                  = G,
     n_after_annotation = length(narrow_ids)
   )
+}
+
+
+#' Records of One Region From the Variant Index
+#'
+#' Returns the ids and file positions of the index records on \code{chr} with
+#' position in \code{[start, end]}, in file order: two binary searches on a
+#' sorted chromosome, else a mask. The same set the chromosome-wide logical
+#' mask selected before the index existed.
+#'
+#' @param variant_index A \code{glow_variant_index}.
+#' @param chr,start,end The region (scalars).
+#' @return A list with \code{variant_id} and \code{sel} (both empty when the
+#'   chromosome is absent or the span holds no record).
+#' @keywords internal
+#' @noRd
+.index_region_lookup <- function(variant_index, chr, start, end) {
+  ix <- variant_index[[as.character(chr)]]
+  if (is.null(ix)) return(list(variant_id = integer(0), sel = integer(0)))
+  start <- as.integer(start); end <- as.integer(end)
+  if (isTRUE(ix$sorted)) {
+    lo <- findInterval(start - 1L, ix$pos) + 1L   # first record with pos >= start
+    hi <- findInterval(end, ix$pos)                # last record with pos <= end
+    if (hi < lo) return(list(variant_id = integer(0), sel = integer(0)))
+    keep <- lo:hi
+  } else {
+    keep <- which(ix$pos >= start & ix$pos <= end)
+  }
+  list(variant_id = ix$variant_id[keep], sel = ix$sel[keep])
 }
 
 

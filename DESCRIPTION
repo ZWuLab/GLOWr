@@ -1,8 +1,8 @@
 Package: GLOWr
 Type: Package
 Title: inteGrative anaLysis using Optimized Weights (GLOW) for Rare Variant Analysis
-Version: 0.2.2
-Date: 2026-10-05
+Version: 0.2.3
+Date: 2026-10-09
 Authors@R: c(
     person("Hong", "Zhang", email = "consistencyzhang@gmail.com", role = "aut"),
     person("Ming", "Liu", email = "mliu5@wpi.edu", role = "aut"),
@@ -24,6 +24,7 @@ Imports: stats,
     utils,
     graphics,
     grDevices,
+    parallel,
     glmnet,
     Matrix,
     SPAtest,
