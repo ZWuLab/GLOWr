@@ -1,3 +1,15 @@
+# GLOWr 0.3.2
+
+- **The promoter masks no longer ask for `GenomeInfoDb`.** Since Bioconductor 3.22 the
+  `seqnames()` generic lives in the new `Seqinfo` package, and `GenomicFeatures` and
+  `GenomicRanges` no longer install `GenomeInfoDb`. On a current R the two promoter masks
+  therefore stopped with "The promoter masks need the GenomeInfoDb package" although
+  everything they use was installed, which is how the public check of GLOWpipeline 0.2.1
+  failed. The one call now goes through `GenomicRanges::seqnames()`, which both Bioconductor
+  generations export, and `GenomeInfoDb` leaves `Suggests`. The masks need `GenomicFeatures`
+  and `TxDb.Hsapiens.UCSC.hg38.knownGene` (with their own dependencies) only. No result
+  changes.
+
 # GLOWr 0.3.1
 
 - **The GLOW methods paper is published.** Every reference to it (the help pages,

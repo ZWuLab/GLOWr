@@ -102,9 +102,9 @@ windows of \code{GenomicFeatures::promoters(genes(TxDb.Hsapiens.UCSC.hg38.knownG
 3000, 3000)}, genome-wide, as STAARpipeline does: the window is not tied to
 the linked gene, so a variant can lie in gene A's window and be linked to
 gene B by its annotation. The packages \code{TxDb.Hsapiens.UCSC.hg38.knownGene},
-\code{GenomicFeatures}, \code{GenomicRanges}, \code{IRanges} and
-\code{GenomeInfoDb} are needed for those two masks only; the aGDS must be
-on hg38, which the code does not verify.
+\code{GenomicFeatures}, \code{GenomicRanges} and \code{IRanges} are needed
+for those two masks only; the aGDS must be on hg38, which the code does not
+verify.
 }
 
 \section{The linkage rules}{

@@ -66,9 +66,9 @@
 #' 3000, 3000)}, genome-wide, as STAARpipeline does: the window is not tied to
 #' the linked gene, so a variant can lie in gene A's window and be linked to
 #' gene B by its annotation. The packages \code{TxDb.Hsapiens.UCSC.hg38.knownGene},
-#' \code{GenomicFeatures}, \code{GenomicRanges}, \code{IRanges} and
-#' \code{GenomeInfoDb} are needed for those two masks only; the aGDS must be
-#' on hg38, which the code does not verify.
+#' \code{GenomicFeatures}, \code{GenomicRanges} and \code{IRanges} are needed
+#' for those two masks only; the aGDS must be on hg38, which the code does not
+#' verify.
 #'
 #' @section The linkage rules:
 #' Under the default \code{rule = "glow"} a record is linked by the meaning of
@@ -391,7 +391,7 @@ define_regions_noncoding <- function(gds, chr, category, filter_spec,
   w <- .noncoding_cache$promoter_windows
   if (!is.null(w)) return(w)
   for (pkg in c("GenomicFeatures", "TxDb.Hsapiens.UCSC.hg38.knownGene",
-                "GenomicRanges", "IRanges", "GenomeInfoDb")) {
+                "GenomicRanges", "IRanges")) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
       stop("The promoter masks need the ", pkg, " package. Install it with ",
            "BiocManager::install('", pkg, "').", call. = FALSE)
@@ -421,7 +421,7 @@ define_regions_noncoding <- function(gds, chr, category, filter_spec,
 .in_promoter_windows <- function(pos, chr, windows) {
   if (length(pos) == 0L) return(logical(0))
   seqname <- if (grepl("^chr", chr)) chr else paste0("chr", chr)
-  w <- windows[as.character(GenomeInfoDb::seqnames(windows)) == seqname]
+  w <- windows[as.character(GenomicRanges::seqnames(windows)) == seqname]
   if (length(w) == 0L) return(rep(FALSE, length(pos)))
   q <- IRanges::IRanges(start = as.integer(pos), width = 1L)
   as.logical(IRanges::countOverlaps(q, IRanges::ranges(w)) > 0L)
