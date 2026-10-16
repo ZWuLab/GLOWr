@@ -22,7 +22,15 @@ extract_variant_set(
 If a path, the file is opened and closed internally.}
 
 \item{region}{A list or single-row data.frame with elements/columns:
-chr, start, end. Optional: region_id, label.}
+chr, start, end. Optional: region_id, label, and \code{variant_rows}, an
+integer vector of row numbers in the chromosome's variant index (the
+candidate list of \code{\link{define_regions_noncoding}}): unique,
+strictly increasing, whole numbers within the index, also accepted as
+the one-row list column of a regions table. When present it replaces the
+interval lookup by \code{start} and \code{end}; \code{integer(0)} is an
+empty set and returns \code{NULL}, and an invalid list stops with the
+region's label. Everything after the lookup (QC, variant type, MAF, MAC,
+the annotations) applies as for an interval.}
 
 \item{filter_spec}{A \code{glow_variant_filter} from \code{variant_filter()}
 or \code{coding_filter()}.}

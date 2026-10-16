@@ -23,6 +23,7 @@
 #   - .resolve_annotation_path()       Map annotation name to GDS path
 #   - .extract_annotation_scores()     Read numeric annotation columns
 #   - .impute_geno_vset()              Impute missing genotypes + compute MAF/MAC
+#   - .validate_variant_rows()         Check a region's explicit candidate list
 
 
 #################### EXPORTED MAIN FUNCTIONS ####################
@@ -36,7 +37,15 @@
 #' @param gds An open \code{SeqVarGDSClass} object or character file path.
 #'   If a path, the file is opened and closed internally.
 #' @param region A list or single-row data.frame with elements/columns:
-#'   chr, start, end. Optional: region_id, label.
+#'   chr, start, end. Optional: region_id, label, and \code{variant_rows}, an
+#'   integer vector of row numbers in the chromosome's variant index (the
+#'   candidate list of \code{\link{define_regions_noncoding}}): unique,
+#'   strictly increasing, whole numbers within the index, also accepted as
+#'   the one-row list column of a regions table. When present it replaces the
+#'   interval lookup by \code{start} and \code{end}; \code{integer(0)} is an
+#'   empty set and returns \code{NULL}, and an invalid list stops with the
+#'   region's label. Everything after the lookup (QC, variant type, MAF, MAC,
+#'   the annotations) applies as for an interval.
 #' @param filter_spec A \code{glow_variant_filter} from \code{variant_filter()}
 #'   or \code{coding_filter()}.
 #' @param sample_id Character vector of sample IDs for extraction and ordering.
@@ -143,17 +152,32 @@ extract_variant_set <- function(gds,
   # below start from the whole file (as the chromosome-wide read used to).
   SeqArray::seqResetFilter(gds, verbose = FALSE)
 
-  # ---- 5. Positional filter, from the index ----
-  hit <- .index_region_lookup(variant_index, region$chr, region$start, region$end)
-  n_total_in_region <- length(hit$variant_id)
+  # ---- 5. The region's candidates: an explicit list, or the interval ----
+  # A gene-centric non-coding region (define_regions_noncoding()) carries its
+  # candidates as `variant_rows`, row numbers in the chromosome's index, unique
+  # and increasing; ids and file positions are direct subsets of the same index
+  # rows, so no chromosome-length match runs per set. SeqArray returns records
+  # in file order and the filter helper applies its QC and type vectors to the
+  # candidates in the order given, which is why the rows must be increasing.
+  # Any other region is the interval lookup, as before.
+  if (!is.null(region$variant_rows)) {
+    ix <- variant_index[[as.character(region$chr)]]
+    rows <- .validate_variant_rows(region$variant_rows,
+                                   if (is.null(ix)) 0L else length(ix$pos),
+                                   region$label)
+    region_variant_ids <- ix$variant_id[rows]
+    region_variant_sel <- ix$sel[rows]
+  } else {
+    hit <- .index_region_lookup(variant_index, region$chr, region$start, region$end)
+    region_variant_ids <- hit$variant_id
+    region_variant_sel <- hit$sel        # file positions of the same records
+  }
+  n_total_in_region <- length(region_variant_ids)
 
   if (n_total_in_region == 0) {
     if (verbose >= 1) message("No variants in region ", region$label)
     return(NULL)
   }
-
-  region_variant_ids <- hit$variant_id
-  region_variant_sel <- hit$sel        # file positions of the same records
 
   # ---- 6. Apply filter spec (QC + type + annotation clauses + MAF/MAC) ----
   # Delegates to .select_variants_by_spec() so per-gene (this function) and
@@ -768,6 +792,17 @@ compute_annotation_medians <- function(gds,
   region$start <- as.integer(region$start)
   region$end <- as.integer(region$end)
 
+  # A candidate list arriving as a list column (one row of a
+  # define_regions_noncoding() table taken with as.list(), or an I(list())
+  # element) is unwrapped to its vector.
+  if (!is.null(region$variant_rows) && is.list(region$variant_rows)) {
+    if (length(region$variant_rows) != 1L) {
+      stop("Region ", region$label, ": `variant_rows` must hold one candidate ",
+           "vector.", call. = FALSE)
+    }
+    region$variant_rows <- region$variant_rows[[1L]]
+  }
+
   if (is.null(region$region_id)) {
     region$region_id <- paste0("chr", region$chr, ":", region$start, "-", region$end)
   }
@@ -776,6 +811,33 @@ compute_annotation_medians <- function(gds,
   }
 
   region
+}
+
+
+#' Validate a Region's Candidate List
+#'
+#' The candidates of a gene-centric non-coding region are row numbers in the
+#' chromosome's variant index: whole numbers, no NA, within \code{1..n}, and
+#' strictly increasing (so unique and in file order). An empty vector is a
+#' valid empty set.
+#'
+#' @param rows The candidate vector.
+#' @param n The index's record count on the region's chromosome (0 when the
+#'   chromosome is absent).
+#' @param label The region label, for the message.
+#' @return An integer vector.
+#' @keywords internal
+#' @noRd
+.validate_variant_rows <- function(rows, n, label) {
+  bad <- function(why) stop("Region ", label, ": invalid `variant_rows` (", why,
+                            ").", call. = FALSE)
+  if (!is.numeric(rows)) bad("not numeric")
+  if (length(rows) == 0L) return(integer(0))
+  if (anyNA(rows)) bad("missing values")
+  if (any(rows != floor(rows))) bad("not whole numbers")
+  if (any(rows < 1) || any(rows > n)) bad(sprintf("outside 1..%d", n))
+  if (any(diff(rows) <= 0)) bad("not strictly increasing")
+  as.integer(rows)
 }
 
 

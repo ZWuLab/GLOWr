@@ -7,14 +7,21 @@
 #   save_B_model()  - Save a glow_B_model (or glow_B_estimate) to RDS
 #   load_B_model()  - Load and validate a saved glow_B_model from RDS
 
+# The serialization format of the envelope written by save_B_model() and read
+# by load_B_model(). Bump it only when the envelope's layout changes; the
+# loader warns on any other stamp.
+.B_MODEL_FORMAT_VERSION <- 1L
+
 #################### EXPORTED MAIN FUNCTIONS ####################
 
 #' Save a Trained B Estimation Model
 #'
 #' @description
 #' Saves a trained \code{glow_B_model} object to an RDS file with a metadata
-#' envelope for validation on load. The metadata includes package version,
-#' save date, training size, and model selection information.
+#' envelope for validation on load. The metadata includes the package version
+#' (kept as provenance), save date, training size, and model selection
+#' information, and the envelope carries the serialization format
+#' (\code{format_version}), which \code{\link{load_B_model}} checks.
 #'
 #' Also accepts a \code{glow_B_estimate} object (from \code{\link{get_B}} with
 #' \code{return_full = TRUE}), from which the nested \code{$model} is extracted
@@ -96,7 +103,7 @@ save_B_model <- function(model, path, compress = TRUE) {
   envelope <- list(
     model          = b_model,
     metadata       = metadata,
-    format_version = 1L
+    format_version = .B_MODEL_FORMAT_VERSION
   )
 
   # Save
@@ -113,6 +120,17 @@ save_B_model <- function(model, path, compress = TRUE) {
 #' Loads a saved \code{glow_B_model} object and optionally validates its
 #' structure, including checking the metadata envelope and testing prediction
 #' capability.
+#'
+#' @details
+#' The validation checks the envelope's fields, the model's class, the
+#' presence of a fitted model and a test prediction, and compares the
+#' envelope's \code{format_version} with the serialization format this
+#' version of the package reads (format 1). A file whose stamp differs, is
+#' absent or is not a single number is still loaded, with a warning that asks
+#' the user to verify its predictions. The version of GLOWr that saved the
+#' model is recorded in the envelope's metadata as provenance and is not
+#' compared, so a model saved by an earlier version loads without a warning
+#' as long as the format is the same.
 #'
 #' @param path Character. Path to a saved B model (.rds file).
 #' @param validate Logical (default \code{TRUE}). Check object structure on load.
@@ -142,12 +160,26 @@ load_B_model <- function(path, validate = TRUE) {
 
   if (validate) {
     # Check envelope structure
-    required_fields <- c("model", "metadata", "format_version")
+    required_fields <- c("model", "metadata")
     missing <- setdiff(required_fields, names(envelope))
     if (length(missing) > 0) {
       stop("Invalid B model file: missing fields: ",
            paste(missing, collapse = ", "),
            ". Was this file created by save_B_model()?")
+    }
+
+    # Format check: the stamp against the format this version reads. The
+    # saving package version (metadata$glowr_version) is provenance only.
+    fmt <- envelope$format_version
+    fmt_ok <- !is.null(fmt) && is.numeric(fmt) && length(fmt) == 1L &&
+      !is.na(fmt) && fmt == .B_MODEL_FORMAT_VERSION
+    if (!fmt_ok) {
+      warning("B model file ", path, " carries format_version ",
+              if (is.null(fmt)) "<absent>" else paste(format(fmt), collapse = ","),
+              "; this GLOWr (", as.character(utils::packageVersion("GLOWr")),
+              ") reads format ", .B_MODEL_FORMAT_VERSION,
+              ". The model is loaded; verify its predictions before use.",
+              call. = FALSE)
     }
 
     # Check model class: accept glow_B_model (new) or glow_B_estimate (legacy)
@@ -184,14 +216,6 @@ load_B_model <- function(path, validate = TRUE) {
     }, error = function(e) {
       stop("Loaded model failed prediction test: ", e$message)
     })
-
-    # Version check
-    current <- as.character(utils::packageVersion("GLOWr"))
-    if (!is.null(envelope$metadata$glowr_version) &&
-        envelope$metadata$glowr_version != current) {
-      warning("Model was saved with GLOWr ", envelope$metadata$glowr_version,
-              ", current version is ", current)
-    }
 
     # Return the extracted/validated glow_B_model
     return(loaded_model)

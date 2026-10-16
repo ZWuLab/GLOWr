@@ -247,7 +247,7 @@ glow_region_test <- function(gds, region, filter_spec,
            "installed. Install STAAR (e.g. remotes::install_github(",
            "'xihaoli/STAAR')) or pass staar = NULL for GLOW only.")
     }
-    .validate_staar_context(staar)
+    .validate_staar_context(staar, pi_features)
   }
 
   # NULL-/error-return template keeps the contract uniform.
@@ -412,7 +412,7 @@ glow_region_test <- function(gds, region, filter_spec,
 #' @param staar A STAAR context (see \code{glow_region_test}'s \code{staar}).
 #' @keywords internal
 #' @noRd
-.validate_staar_context <- function(staar) {
+.validate_staar_context <- function(staar, pi_features = NULL) {
   if (!is.list(staar)) stop("`staar` must be a list (the STAAR context) or NULL.")
   missing_fields <- setdiff(c("null_model", "anno_cols", "rare_maf_cutoff"),
                             names(staar))
@@ -420,6 +420,18 @@ glow_region_test <- function(gds, region, filter_spec,
     stop("STAAR context is missing required field(s): ",
          paste(missing_fields, collapse = ", "),
          ". Expected: null_model, anno_cols, rare_maf_cutoff.")
+  }
+  # The comparator's annotation columns are read from the extracted
+  # annotations, which are pi_features; a column outside them would fail the
+  # region at the comparator step instead of being caught here.
+  if (!is.null(pi_features)) {
+    miss <- setdiff(staar$anno_cols, pi_features)
+    if (length(miss) > 0L) {
+      stop("STAAR context: anno_cols name annotation column(s) that are not ",
+           "among pi_features, the columns extracted for every region: ",
+           paste(miss, collapse = ", "),
+           ". Pass anno_cols as a subset of pi_features.", call. = FALSE)
+    }
   }
   invisible(NULL)
 }

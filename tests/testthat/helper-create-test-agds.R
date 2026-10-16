@@ -4,6 +4,19 @@
 #' so that every filtering outcome is deterministic and verifiable.
 #'
 #' File Log (reverse chronological order):
+#' - 2026-10-16: Updated by Claude Code (Fable 5.1) after the implementation
+#'               `layout = "favor2"` writes GENCODE.Info in the FAVOR 2.0
+#'               serialization (gene names only, joined by ","), for the
+#'               round-trip test of the masks on that layout.
+#' - 2026-10-15: Updated by Claude Code (Fable 5.1), prompted by ZWu. Planted
+#'               the gene-linkage strings of the gene-centric non-coding masks
+#'               v1 shapes of upstream/downstream records (two genes; the
+#'               two-category "upstream;downstream" on 29:30), UTR records with
+#'               transcript details (a multi-gene record on 76:78, "UTR5;UTR3"
+#'               on 79:80), ncRNA records of bundled chromosome 22 ncRNA genes
+#'               on 36:40, GeneHancer strings in the v1 layout (a header
+#'               without targets on 69), and CAGE/DHS presence on records that
+#'               also carry GeneHancer. Both copies changed identically.
 #' - 2026-06-15: Updated by Claude Code (Opus 4.8 / 1M ctx), prompted by ZWu.
 #'               create_test_agds() now SKIPs (was stop()) when a GDS
 #'               Bioconductor package (gdsfmt/SeqArray/SNPRelate) is unavailable,
@@ -78,10 +91,12 @@
 # every caller gets byte-identical data no matter what order the files run in.
 .test_agds_cache <- new.env(parent = emptyenv())
 
-create_test_agds <- function(file_path) {
+create_test_agds <- function(file_path, layout = c("v1", "favor2")) {
+  layout <- match.arg(layout)
 
-  # -- Serve a copy of the session's already-built fixture, if there is one. --
-  cached <- .test_agds_cache$path
+  # -- Serve a copy of the session's already-built fixture of this layout, if
+  #    there is one (one cache slot per layout). --
+  cached <- .test_agds_cache[[paste0("path_", layout)]]
   if (!is.null(cached) && file.exists(cached)) {
     if (!file.copy(cached, file_path, overwrite = TRUE)) {
       stop("create_test_agds(): failed to copy the cached fixture to ", file_path)
@@ -214,13 +229,23 @@ create_test_agds <- function(file_path) {
   genecode_info[16:20]      <- "GENE_A"
   exonic_info[16:20]        <- "GENE_A"
 
-  # Upstream (indices 21:30)
+  # Upstream (indices 21:30): the FAVOR v1 shape of a record upstream of two
+  # genes ("G,G"); 29:30 are the two-category shape "G;G" with the category
+  # "upstream;downstream" (upstream of GENE_A, downstream of GENE_B).
   genecode_category[21:30]  <- "upstream"
-  genecode_info[21:30]      <- "GENE_A(dist=500),GENE_B(dist=1000)"
+  genecode_info[21:30]      <- "GENE_A,GENE_B"
+  genecode_category[29:30]  <- "upstream;downstream"
+  genecode_info[29:30]      <- "GENE_A;GENE_B"
 
-  # Intronic (indices 31:40)
+  # Intronic (indices 31:35); 36:40 are ncRNA records of genes present in the
+  # bundled ncRNA table of chromosome 22 (POTEH-AS1, LINC01297), 40 with the
+  # two-category shape "G;P" of an ncRNA_exonic;splicing record.
   genecode_category[31:40]  <- "intronic"
   genecode_info[31:40]      <- "GENE_A"
+  genecode_category[36:39]  <- "ncRNA_exonic"
+  genecode_info[36:39]      <- "POTEH-AS1"
+  genecode_category[40]     <- "ncRNA_exonic;splicing"
+  genecode_info[40]         <- "POTEH-AS1;LINC01297(ENST00000000003.1:exon2:c.10-2A>G)"
 
   # ==========================================================================
   # GENE_B (indices 41:80): 5 stoploss, 5 splicing, 5 frameshift, 5 missense,
@@ -250,13 +275,18 @@ create_test_agds <- function(file_path) {
   exonic_info[56:60]        <- "GENE_B"
   metasvm_pred[56:60]       <- "D"
 
-  # Downstream (indices 61:70)
+  # Downstream (indices 61:70): downstream of GENE_B and GENE_C.
   genecode_category[61:70]  <- "downstream"
-  genecode_info[61:70]      <- "GENE_B(dist=200),GENE_C(dist=5000)"
+  genecode_info[61:70]      <- "GENE_B,GENE_C"
 
-  # UTR3 (indices 71:80)
+  # UTR (indices 71:80): the v1 shape "P" (gene with a transcript detail that
+  # contains a comma) for 71:75; a single-category multi-gene UTR record
+  # ("P,P") for 76:78; the two-category "UTR5;UTR3" shape ("P;P") for 79:80.
   genecode_category[71:80]  <- "UTR3"
-  genecode_info[71:80]      <- "GENE_B"
+  genecode_info[71:80]      <- "GENE_B(ENST00000000001.1:c.*100A>G,ENST00000000002.1:c.*95A>G)"
+  genecode_info[76:78]      <- "GENE_B(ENST00000000001.1:c.*16G>A),GENE_C(ENST00000000004.1:c.*5C>T)"
+  genecode_category[79:80]  <- "UTR5;UTR3"
+  genecode_info[79:80]      <- "GENE_B(ENST00000000001.1:c.-10A>G);GENE_C(ENST00000000004.1:c.*7T>C)"
 
   # ==========================================================================
   # GENE_C (indices 81:110): All synonymous (negative control)
@@ -294,14 +324,20 @@ create_test_agds <- function(file_path) {
   metasvm_pred[121:125]       <- "D"
 
   # --- Populate a few noncoding regulatory annotations for testing ---
-  # Some upstream/downstream/intronic variants get enhancer/promoter/RDHS values
-  genehancer[21:23]  <- "GH22E000001"
-  genehancer[61:63]  <- "GH22E000002"
-  cage_tc[24:26]     <- "TC_chr22_1000"
+  # Some upstream/downstream/intronic variants get enhancer/promoter/RDHS
+  # values. GeneHancer strings have the v1 layout (header, then the connected
+  # genes in the element's order); 69 is a header without targets.
+  genehancer[21:23]  <- "Name=0.50;genehancer_id=GH22E000001;connected_gene=GENE_A;score=10.50;connected_gene=GENE_B;score=1.20"
+  genehancer[61:63]  <- "Name=0.30;genehancer_id=GH22E000002;connected_gene=GENE_C;score=5.00;connected_gene=GENE_B;score=0.40"
+  genehancer[69]     <- "Name=0.10;genehancer_id=GH22E000003"
+  cage_tc[22:26]     <- "TC_chr22_1000"
   cage_tc[64:66]     <- "TC_chr22_2000"
+  cage_tc[69]        <- "TC_chr22_2001"
   cage_promoter[27:29] <- "promoter_GENE_A"
   cage_promoter[67:69] <- "promoter_GENE_B"
+  rdhs[21]           <- "RDHS_000"
   rdhs[30]           <- "RDHS_001"
+  rdhs[61]           <- "RDHS_002"
   rdhs[70]           <- "RDHS_002"
   rdhs[31:35]        <- "RDHS_003"
 
@@ -380,6 +416,22 @@ create_test_agds <- function(file_path) {
                       compress = "LZMA_ra", closezip = TRUE)
   }
 
+  # -- The FAVOR 2.0 layout of GENCODE.Info (favor_annotator.R,
+  #    .favor2_serialize()): the gene names only, unique, joined by ",", so the
+  #    transcript details and the ";" group boundary of a two-category record
+  #    are lost. The category string and the GeneHancer, CAGE and DHS fields
+  #    keep their shape. --
+  if (identical(layout, "favor2")) {
+    strip <- function(s) {
+      repeat { t <- gsub("\\([^()]*\\)", "", s); if (identical(t, s)) return(s); s <- t }
+    }
+    genecode_info <- vapply(genecode_info, function(s) {
+      if (!nzchar(s)) return("")
+      g <- unique(trimws(strsplit(strip(s), "[;,]")[[1L]]))
+      paste(g[nzchar(g)], collapse = ",")
+    }, character(1), USE.NAMES = FALSE)
+  }
+
   # -- String annotations --
   .add_anno("genecode_comprehensive_category",        genecode_category)
   .add_anno("genecode_comprehensive_exonic_category",  exonic_category)
@@ -422,7 +474,7 @@ create_test_agds <- function(file_path) {
   on.exit({
     cache_path <- tempfile("glowr_test_agds_cache_", fileext = ".gds")
     if (file.copy(file_path, cache_path, overwrite = TRUE)) {
-      .test_agds_cache$path <- cache_path
+      .test_agds_cache[[paste0("path_", layout)]] <- cache_path
     }
   }, add = TRUE, after = TRUE)
 

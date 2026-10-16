@@ -1,3 +1,36 @@
+# GLOWr 0.3.0
+
+- **The gene-centric non-coding masks.** `define_regions_noncoding()` builds, once per
+  chromosome and mask, the regions of STAARpipeline's eight gene-centric non-coding masks
+  (`upstream`, `downstream`, `UTR`, `promoter_CAGE`, `promoter_DHS`, `enhancer_CAGE`,
+  `enhancer_DHS`, `ncRNA`). A region is one gene. Its candidates are the records that the
+  annotation links to the gene wherever they lie on the chromosome, stored as a list column
+  `variant_rows` of row numbers in the chromosome's variant index.
+  `extract_variant_set()` takes such a region in place of its interval lookup, after
+  validating the list (unique, increasing, within the index). Everything after the lookup
+  is unchanged. `noncoding_filter(mask, filter_spec)` returns the per-set filter (the run's
+  filter with no annotation clause), and `noncoding_masks()` the eight names. The masks read
+  the aGDS fields `GENCODE.Category`, `GENCODE.Info`, `GeneHancer`, `CAGE` and `DHS` of the
+  bundled catalog, which `annotate_favor()` writes by default, in both the FAVOR v1 and the
+  FAVOR 2.0 layouts. The gene is read by the meaning of the field: details in parentheses
+  are removed, `;` separates the groups of a multi-category record, `,` separates genes,
+  `NONE` is a sentinel, and hyphenated names stay whole. A record annotated
+  `upstream;downstream` therefore joins both masks, a UTR record naming two genes joins both
+  sets, and an ncRNA record with several groups links them all. STAARpipeline's literal
+  string rules are available as `rule = "staar"`, and they gave the same candidate sets
+  variant for variant on chromosome 22 of the 1000 Genomes Project. The two promoter masks
+  keep the records within 3 kb of a transcription start site of
+  `TxDb.Hsapiens.UCSC.hg38.knownGene`. That package is now suggested, together with
+  `GenomicFeatures`, `GenomicRanges`, `IRanges` and `GenomeInfoDb`.
+- **`load_B_model()` checks the file's format, not the package version that saved it.** The
+  loader warned whenever the model had been saved by a different GLOWr version, so a valid model
+  file produced a warning on every load after the next release. It now compares the envelope's
+  `format_version` with the format this version reads (1), warns when the stamp differs, is
+  absent or is not a single number, and keeps the saving version in the file's metadata as
+  provenance. A model saved by an earlier GLOWr release carries format 1 in its envelope and
+  loads without a warning and predicts as before (the model sent to Alberto Brusati on
+  2026-09-01, saved by 0.1.0, is one).
+
 # GLOWr 0.2.3
 
 Changes for whole-genome-sequencing scans, after Alberto Brusati's Terra runs of chromosomes

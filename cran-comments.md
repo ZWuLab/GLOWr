@@ -1,4 +1,4 @@
-# cran-comments for GLOWr 0.2.3
+# cran-comments for GLOWr 0.3.0
 
 ## Test environment
 - R 4.3.3 on x86_64-conda-linux-gnu
@@ -6,7 +6,7 @@
 - LaTeX present: full manual check ran.
 
 ## R CMD check results
-- 0 ERROR | 0 WARNING | 5 NOTE
+- 0 ERROR | 0 WARNING | 6 NOTE
 
 - No ERRORs.
 
@@ -25,6 +25,11 @@ Unknown, possibly misspelled, fields in DESCRIPTION:
 ```
 * checking for future file timestamps ... NOTE
 unable to verify current time
+```
+
+```
+* checking dependencies in R code ... NOTE
+Warning: program compiled against libxml 213 using older 209
 ```
 
 ```

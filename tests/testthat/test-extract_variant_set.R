@@ -677,3 +677,65 @@ test_that("count_index_records is vectorized and agrees with a mask", {
   idx_u[["22"]]$sorted <- FALSE
   expect_equal(count_index_records(idx_u, "22", starts, ends), n)
 })
+
+
+# ==============================================================================
+# ==============================================================================
+
+test_that("a region with variant_rows takes those index rows; a missing field takes the interval", {
+  idx <- build_variant_index(test_agds_path)
+  spec <- variant_filter(variant_type = "SNV", rare_maf_cutoff = 0.5, min_variants = 1L)
+  pos <- idx[["22"]]$pos
+  # The interval of GENE_A's first ten records, and the same records as a list.
+  vi <- extract_variant_set(test_agds_path, list(chr = "22", start = pos[1], end = pos[10]),
+                            spec, variant_index = idx, verbose = 0)
+  vl <- extract_variant_set(test_agds_path,
+                            list(chr = "22", start = 1L, end = 2L, label = "L", variant_rows = 1:10),
+                            spec, variant_index = idx, verbose = 0)
+  expect_equal(vl$n_total_in_region, 10L)
+  expect_equal(vl$variant_info, vi$variant_info)
+  expect_equal(vl$G, vi$G)
+  expect_equal(vl$n_after_annotation, vi$n_after_annotation)
+  # The list column of a regions table row (data.frame with an I(list()) column)
+  # and a one-element list are unwrapped.
+  regs <- data.frame(region_id = "L", chr = "22", start = 1L, end = 2L, label = "L",
+                     stringsAsFactors = FALSE)
+  regs$variant_rows <- I(list(1:10))
+  vr <- extract_variant_set(test_agds_path, regs[1, ], spec, variant_index = idx, verbose = 0)
+  expect_equal(vr$variant_info, vi$variant_info)
+  vr2 <- extract_variant_set(test_agds_path, as.list(regs[1, , drop = FALSE]), spec,
+                             variant_index = idx, verbose = 0)
+  expect_equal(vr2$variant_info, vi$variant_info)
+  # Doubles with whole values are accepted.
+  vd <- extract_variant_set(test_agds_path,
+                            list(chr = "22", start = 1L, end = 2L, label = "D", variant_rows = c(1, 2, 3)),
+                            spec, variant_index = idx, verbose = 0)
+  expect_equal(vd$n_total_in_region, 3L)
+})
+
+test_that("an empty candidate list is an empty set; invalid lists stop with the label", {
+  idx <- build_variant_index(test_agds_path)
+  spec <- variant_filter(rare_maf_cutoff = 0.5, min_variants = 1L)
+  r <- function(rows) list(chr = "22", start = 1L, end = 2L, label = "BAD", variant_rows = rows)
+  expect_null(extract_variant_set(test_agds_path, r(integer(0)), spec, variant_index = idx, verbose = 0))
+  expect_error(extract_variant_set(test_agds_path, r(c(3L, 1L)), spec, variant_index = idx, verbose = 0),
+               "BAD.*strictly increasing")
+  expect_error(extract_variant_set(test_agds_path, r(c(1L, 1L)), spec, variant_index = idx, verbose = 0),
+               "strictly increasing")
+  expect_error(extract_variant_set(test_agds_path, r(c(0L, 2L)), spec, variant_index = idx, verbose = 0),
+               "outside 1..125")
+  expect_error(extract_variant_set(test_agds_path, r(c(1L, 999L)), spec, variant_index = idx, verbose = 0),
+               "outside 1..125")
+  expect_error(extract_variant_set(test_agds_path, r(c(1.5, 2)), spec, variant_index = idx, verbose = 0),
+               "whole numbers")
+  expect_error(extract_variant_set(test_agds_path, r(c(1L, NA)), spec, variant_index = idx, verbose = 0),
+               "missing values")
+  expect_error(extract_variant_set(test_agds_path, r("a"), spec, variant_index = idx, verbose = 0),
+               "not numeric")
+  expect_error(extract_variant_set(test_agds_path, r(list(1:2, 3:4)), spec, variant_index = idx, verbose = 0),
+               "one candidate vector")
+  # A chromosome absent from the index: every row is outside 1..0.
+  expect_error(extract_variant_set(test_agds_path,
+                                   list(chr = "21", start = 1L, end = 2L, label = "C21", variant_rows = 1L),
+                                   spec, variant_index = idx, verbose = 0), "outside 1..0")
+})

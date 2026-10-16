@@ -1,8 +1,8 @@
 Package: GLOWr
 Type: Package
 Title: inteGrative anaLysis using Optimized Weights (GLOW) for Rare Variant Analysis
-Version: 0.2.3
-Date: 2026-10-09
+Version: 0.3.0
+Date: 2026-10-16
 Authors@R: c(
     person("Hong", "Zhang", email = "consistencyzhang@gmail.com", role = "aut"),
     person("Ming", "Liu", email = "mliu5@wpi.edu", role = "aut"),
@@ -46,6 +46,11 @@ Suggests: arrow,
     SNPRelate,
     STAAR,
     rprojroot,
+    GenomicFeatures,
+    GenomicRanges,
+    IRanges,
+    GenomeInfoDb,
+    TxDb.Hsapiens.UCSC.hg38.knownGene,
     withr
 Remotes: ZWuLab/GFisher,
     xihaoli/STAAR

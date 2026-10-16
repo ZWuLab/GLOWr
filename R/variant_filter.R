@@ -9,6 +9,9 @@
 # EXPORTED FUNCTIONS:
 #   - variant_filter()              General-purpose filter constructor
 #   - coding_filter()               Predefined coding category filter
+#   - noncoding_filter()            The per-set filter of a gene-centric
+#                                   non-coding mask (the run's filter copied)
+#   - noncoding_masks()             The eight mask names
 #   - print.glow_variant_filter()   Print method for filter specs
 #
 # INTERNAL HELPERS:
@@ -177,6 +180,80 @@ coding_filter <- function(category,
   attr(spec, "category_name") <- category
   spec
 }
+
+
+#' The Per-Set Filter of a Gene-Centric Non-Coding Mask
+#'
+#' Returns the \code{glow_variant_filter} that the sets of one gene-centric
+#' non-coding mask are extracted under: the run's filter copied (QC label and
+#' pass value, variant type, MAF cutoff, minimum MAC, minimum set size) with
+#' no annotation clause, because the mask's selection and its gene linkage
+#' are done once per chromosome by \code{\link{define_regions_noncoding}},
+#' whose candidates already satisfy the mask. The grouping pass applies the
+#' QC label and the variant type; the per-set extraction applies those again
+#' together with the run's MAF cutoff, minimum MAC and minimum set size.
+#' The filter carries the mask's name as the attribute \code{category_name}
+#' (as \code{\link{coding_filter}} does) and its specification as
+#' \code{mask}.
+#'
+#' @param category One of the eight mask names: \code{"upstream"},
+#'   \code{"downstream"}, \code{"UTR"}, \code{"promoter_CAGE"},
+#'   \code{"promoter_DHS"}, \code{"enhancer_CAGE"}, \code{"enhancer_DHS"},
+#'   \code{"ncRNA"}. The masks are described in
+#'   \code{\link{define_regions_noncoding}}.
+#' @param filter_spec The run's \code{glow_variant_filter}, from
+#'   \code{\link{variant_filter}}. Its annotation clauses, if any, are not
+#'   copied.
+#'
+#' @return A \code{glow_variant_filter} with the attributes
+#'   \code{category_name} and \code{mask}.
+#'
+#' @examples
+#' run_filter <- variant_filter(rare_maf_cutoff = 0.01, min_variants = 2L)
+#' spec <- noncoding_filter("enhancer_DHS", run_filter)
+#' spec
+#' attr(spec, "category_name")
+#'
+#' @seealso \code{\link{define_regions_noncoding}}, \code{\link{coding_filter}}
+#' @export
+noncoding_filter <- function(category, filter_spec) {
+  specs <- .noncoding_mask_specs()
+  if (!is.character(category) || length(category) != 1L || !category %in% names(specs)) {
+    stop("Unknown gene-centric non-coding mask: '", paste(category, collapse = ", "),
+         "'. Available: ", paste(names(specs), collapse = ", "), call. = FALSE)
+  }
+  if (!inherits(filter_spec, "glow_variant_filter")) {
+    stop("`filter_spec` must be a glow_variant_filter from variant_filter().", call. = FALSE)
+  }
+  spec <- variant_filter(
+    qc_label = filter_spec$qc_label,
+    qc_pass_value = filter_spec$qc_pass_value,
+    variant_type = filter_spec$variant_type,
+    annotation_clauses = NULL,
+    rare_maf_cutoff = filter_spec$rare_maf_cutoff,
+    min_mac = filter_spec$min_mac,
+    min_variants = filter_spec$min_variants
+  )
+  attr(spec, "category_name") <- category
+  attr(spec, "mask") <- specs[[category]]
+  spec
+}
+
+
+#' The Names of the Eight Gene-Centric Non-Coding Masks
+#'
+#' The mask names \code{\link{noncoding_filter}} and
+#' \code{\link{define_regions_noncoding}} accept, in STAARpipeline's order:
+#' the seven regulatory masks of protein-coding genes, then the ncRNA mask.
+#'
+#' @return A character vector of eight names.
+#'
+#' @examples
+#' noncoding_masks()
+#'
+#' @seealso \code{\link{noncoding_filter}}, \code{\link{define_regions_noncoding}}
+#' @export
+noncoding_masks <- function() names(.noncoding_mask_specs())
 
 
 #' Print Method for Variant Filter Specifications

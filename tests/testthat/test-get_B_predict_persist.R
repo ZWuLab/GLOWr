@@ -633,49 +633,68 @@ test_that("load_B_model handles legacy glow_B_estimate envelope", {
   expect_equal(loaded$method_used, "beta_method")
 })
 
-test_that("load_B_model warns on version mismatch", {
-  set.seed(42)
-  maf <- runif(50, 0.01, 0.3)
-  logX <- log(maf)
-  Y <- -0.14 * logX + 0.5 + rnorm(50, 0, 0.02)
-  lm_obj <- lm(Y ~ logX, data = data.frame(Y = Y, logX = logX))
-  attr(lm_obj, "model_id") <- 3L
-
-  b_model <- structure(list(
-    method_used = "beta_method",
-    models = list(beta_method = lm_obj, pvalue_method = NULL),
-    all_models_info = list(beta_method = NULL, pvalue_method = NULL),
-    outliers = list(method = "none", action = "flag",
-                    beta_method = NULL, pvalue_method = NULL,
-                    indices_removed = integer(0)),
-    training_summary = list(n_original = 50L, n_used = 50L,
-                             n_outliers_detected = 0L,
-                             trait_type = "binary"),
-    training_data = list(MAF = maf, BETA = NULL, P = NULL,
-                         P_mlog10 = NULL, N = NULL, trait = "binary"),
-    comparison = list(criterion_beta_method = 0.85, method_selected = "beta_method"),
-    selection_criterion = "R2"
-  ), class = "glow_B_model")
-
-  tmp <- tempfile(fileext = ".rds")
-  on.exit(unlink(tmp))
-
-  # Save with fake old version
-  envelope <- list(
+# An envelope around a test model, with the stamps given (format_version NULL
+# means the field is left out).
+.b_envelope <- function(b_model, glowr_version, format_version = 1L) {
+  env <- list(
     model = b_model,
     metadata = list(
-      glowr_version = "0.0.1",
+      glowr_version = glowr_version,
       save_date = Sys.Date(),
       training_n = 50L,
       best_method = "beta_method",
-      best_model_id = 3L,
+      best_model_id = 4L,
       R2 = 0.85
-    ),
-    format_version = 1L
-  )
-  saveRDS(envelope, tmp)
+    ))
+  if (!is.null(format_version)) env$format_version <- format_version
+  env
+}
 
-  expect_warning(load_B_model(tmp), "version")
+test_that("load_B_model loads a format-1 envelope saved under another GLOWr version without a warning", {
+  b_model <- .make_test_glow_B_model(model_id = 4L)
+  mafs <- c(0.01, 0.05, 0.1)
+  expected <- predict_B(b_model, target_MAF = mafs)
+  for (saved_by in c("0.0.1", "0.1.0", "9.9.9")) {
+    tmp <- tempfile(fileext = ".rds")
+    saveRDS(.b_envelope(b_model, glowr_version = saved_by, format_version = 1L), tmp)
+    expect_no_warning(loaded <- load_B_model(tmp))
+    expect_s3_class(loaded, "glow_B_model")
+    # The saving version is provenance only: the predictions are unchanged.
+    expect_equal(predict_B(loaded, target_MAF = mafs), expected)
+    unlink(tmp)
+  }
+})
+
+test_that("load_B_model warns on a mismatched, absent or malformed format_version and still loads", {
+  b_model <- .make_test_glow_B_model(model_id = 4L)
+  mafs <- c(0.01, 0.05, 0.1)
+  expected <- predict_B(b_model, target_MAF = mafs)
+  current <- as.character(utils::packageVersion("GLOWr"))
+  stamps <- list(mismatch = 2L, absent = NULL, text = "1", vector = c(1L, 1L),
+                 missing_value = NA_integer_)
+  for (nm in names(stamps)) {
+    tmp <- tempfile(fileext = ".rds")
+    saveRDS(.b_envelope(b_model, glowr_version = current,
+                        format_version = stamps[[nm]]), tmp)
+    expect_warning(loaded <- load_B_model(tmp), "format_version", info = nm)
+    expect_s3_class(loaded, "glow_B_model")
+    expect_equal(predict_B(loaded, target_MAF = mafs), expected, info = nm)
+    unlink(tmp)
+  }
+  # A format-1 stamp stored as a double is the same format.
+  tmp <- tempfile(fileext = ".rds")
+  saveRDS(.b_envelope(b_model, glowr_version = current, format_version = 1), tmp)
+  expect_no_warning(load_B_model(tmp))
+  unlink(tmp)
+})
+
+test_that("load_B_model with validate = FALSE neither checks nor warns on the stamps", {
+  b_model <- .make_test_glow_B_model(model_id = 4L)
+  tmp <- tempfile(fileext = ".rds")
+  on.exit(unlink(tmp))
+  saveRDS(.b_envelope(b_model, glowr_version = "0.0.1", format_version = 7L), tmp)
+  expect_no_warning(loaded <- load_B_model(tmp, validate = FALSE))
+  expect_s3_class(loaded, "glow_B_model")
 })
 
 test_that("save_B_model includes correct metadata", {

@@ -103,3 +103,34 @@ test_that("variant_filter / coding_filter default min_mac is 1L", {
   expect_equal(variant_filter(min_mac = 0L)$min_mac, 0L)
   expect_equal(variant_filter(min_mac = 5L)$min_mac, 5L)
 })
+
+
+test_that("noncoding_filter copies the run's filter for the eight masks, with no clause", {
+  run <- variant_filter(qc_label = "annotation/qc", qc_pass_value = "OK",
+                        variant_type = "variant", rare_maf_cutoff = 0.05,
+                        min_mac = 3L, min_variants = 4L,
+                        annotation_clauses = list(list("GENCODE.Category" = "exonic")))
+  masks <- c("upstream", "downstream", "UTR", "promoter_CAGE", "promoter_DHS",
+             "enhancer_CAGE", "enhancer_DHS", "ncRNA")
+  for (m in masks) {
+    spec <- noncoding_filter(m, run)
+    expect_s3_class(spec, "glow_variant_filter")
+    expect_equal(spec$qc_label, "annotation/qc")
+    expect_equal(spec$qc_pass_value, "OK")
+    expect_equal(spec$variant_type, "variant")
+    expect_equal(spec$rare_maf_cutoff, 0.05)
+    expect_equal(spec$min_mac, 3L)
+    expect_equal(spec$min_variants, 4L)
+    expect_null(spec$annotation_clauses)             # the mask selects, not the filter
+    expect_equal(attr(spec, "category_name"), m)
+    expect_equal(attr(spec, "mask"), GLOWr:::.noncoding_mask_specs()[[m]])
+  }
+  expect_error(noncoding_filter("plof", run), "Unknown gene-centric non-coding mask")
+  expect_error(noncoding_filter(c("UTR", "ncRNA"), run), "Unknown")
+  expect_error(noncoding_filter("UTR", list(rare_maf_cutoff = 0.01)), "glow_variant_filter")
+})
+
+test_that("noncoding_masks() lists the eight masks in STAARpipeline's order", {
+  expect_equal(noncoding_masks(), c("upstream", "downstream", "UTR", "promoter_CAGE", "promoter_DHS",
+                                    "enhancer_CAGE", "enhancer_DHS", "ncRNA"))
+})

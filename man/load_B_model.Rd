@@ -20,6 +20,17 @@ Loads a saved \code{glow_B_model} object and optionally validates its
 structure, including checking the metadata envelope and testing prediction
 capability.
 }
+\details{
+The validation checks the envelope's fields, the model's class, the
+presence of a fitted model and a test prediction, and compares the
+envelope's \code{format_version} with the serialization format this
+version of the package reads (format 1). A file whose stamp differs, is
+absent or is not a single number is still loaded, with a warning that asks
+the user to verify its predictions. The version of GLOWr that saved the
+model is recorded in the envelope's metadata as provenance and is not
+compared, so a model saved by an earlier version loads without a warning
+as long as the format is the same.
+}
 \examples{
 \dontrun{
 B_model <- load_B_model("B_model_als.rds")

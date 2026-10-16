@@ -21,8 +21,10 @@ Invisible character: the path where the model was saved.
 }
 \description{
 Saves a trained \code{glow_B_model} object to an RDS file with a metadata
-envelope for validation on load. The metadata includes package version,
-save date, training size, and model selection information.
+envelope for validation on load. The metadata includes the package version
+(kept as provenance), save date, training size, and model selection
+information, and the envelope carries the serialization format
+(\code{format_version}), which \code{\link{load_B_model}} checks.
 
 Also accepts a \code{glow_B_estimate} object (from \code{\link{get_B}} with
 \code{return_full = TRUE}), from which the nested \code{$model} is extracted
