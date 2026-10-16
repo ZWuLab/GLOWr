@@ -246,9 +246,9 @@ Efficiently controlling for case-control imbalance and sample relatedness in
 large-scale genetic association studies. \emph{Nature Genetics}, 50(9), 1335-1341.
 \doi{10.1038/s41588-018-0184-y}
 
-Zhang, H., Liu, M., Landers, J. E., and Wu, Z. Integrated Weighted Association
-Test with Application to Genetic Association Studies. Annals of Applied
-Statistics (in revision).
+Zhang, H., Liu, M., Landers, J. E., and Wu, Z. (2026). Integrated weighted
+association test with application to genetic association studies. The Annals
+of Applied Statistics, 20(3), 2074-2097. \doi{10.1214/26-AOAS2223}
 }
 \seealso{
 \code{\link{getZ_marg_score}} for the standard (non-SPA) version suitable for

@@ -212,9 +212,9 @@ res$result
 
 }
 \references{
-Zhang, H., Liu, M., Landers, J. E., and Wu, Z. Integrated Weighted Association
-Test with Application to Genetic Association Studies. Annals of Applied
-Statistics (in revision).
+Zhang, H., Liu, M., Landers, J. E., and Wu, Z. (2026). Integrated weighted
+association test with application to genetic association studies. The Annals
+of Applied Statistics, 20(3), 2074-2097. \doi{10.1214/26-AOAS2223}
 
 Li, X., Li, Z., Zhou, H., et al. (2020). Dynamic incorporation of multiple in
 silico functional annotations empowers rare variant association analysis of large

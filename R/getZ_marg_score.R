@@ -167,9 +167,9 @@
 #' # This is ~10-100x faster than refitting null model for each gene set
 #'
 #' @references
-#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. Integrated Weighted Association
-#' Test with Application to Genetic Association Studies. Annals of Applied
-#' Statistics (in revision).
+#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. (2026). Integrated weighted
+#' association test with application to genetic association studies. The Annals
+#' of Applied Statistics, 20(3), 2074-2097. \doi{10.1214/26-AOAS2223}
 #'
 #' @export
 getZ_marg_score <- function(G, X = NULL, Y = NULL, trait = "binary", null_model = NULL,
@@ -606,9 +606,9 @@ getZ_marg_score <- function(G, X = NULL, Y = NULL, trait = "binary", null_model 
 #' large-scale genetic association studies. \emph{Nature Genetics}, 50(9), 1335-1341.
 #' \doi{10.1038/s41588-018-0184-y}
 #'
-#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. Integrated Weighted Association
-#' Test with Application to Genetic Association Studies. Annals of Applied
-#' Statistics (in revision).
+#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. (2026). Integrated weighted
+#' association test with application to genetic association studies. The Annals
+#' of Applied Statistics, 20(3), 2074-2097. \doi{10.1214/26-AOAS2223}
 #'
 #' @seealso
 #' \code{\link{getZ_marg_score}} for the standard (non-SPA) version suitable for
@@ -890,9 +890,9 @@ getZ_marg_score_binary_SPA <- function(G, X = NULL, Y = NULL, null_model = NULL)
 #' result_spa <- getZ_marg_score_binary_SPA(gene_sets[[1]], null_model = null_obj_spa)
 #'
 #' @references
-#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. Integrated Weighted Association
-#' Test with Application to Genetic Association Studies. Annals of Applied
-#' Statistics (in revision).
+#' Zhang, H., Liu, M., Landers, J. E., and Wu, Z. (2026). Integrated weighted
+#' association test with application to genetic association studies. The Annals
+#' of Applied Statistics, 20(3), 2074-2097. \doi{10.1214/26-AOAS2223}
 #'
 #' @seealso
 #' \code{\link{getZ_marg_score}} for standard score calculation

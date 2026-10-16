@@ -1,3 +1,10 @@
+# GLOWr 0.3.1
+
+- **The GLOW methods paper is published.** Every reference to it (the help pages,
+  `citation("GLOWr")` and the README) now cites Zhang, Liu, Landers and Wu (2026), The
+  Annals of Applied Statistics 20(3), 2074-2097, doi:10.1214/26-AOAS2223, in place of
+  "in revision". Documentation only; no code change.
+
 # GLOWr 0.3.0
 
 - **The gene-centric non-coding masks.** `define_regions_noncoding()` builds, once per
