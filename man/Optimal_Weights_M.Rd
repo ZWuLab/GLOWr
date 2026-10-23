@@ -57,11 +57,21 @@ where \eqn{MU = Bstar * PI} and \eqn{V = Bstar^2 * PI * (1-PI)}.
 Two approximation methods are used:
 \enumerate{
 \item \emph{Normal Approximation}: Assumes Z-scores are approximately normal
-under the alternative with means MMU and variances M + MVM, where:
+under the alternative, \eqn{\tilde{Z} \sim N(MMU, M + MVM)}, where:
 \itemize{
 \item MMU = M \\%\emph{\\% MU (marginal means)
 \item MVM = t(M * V) \\%}\\% M (marginal variance contribution from random effects)
 }
+The moments of \eqn{g(\tilde{Z}_i)} are computed on the standardized scale. With
+\eqn{s_i = \sqrt{(M + MVM)_{ii}}} and the correlation matrix
+\eqn{R = \mathrm{cov2cor}(M + MVM)}, \eqn{\tilde{Z}_i = MMU_i + s_i U_i} with
+\eqn{U \sim N(0, R)}: \code{get_r_tilde} receives the standard deviations
+\eqn{s_i}, and \code{CovM_gXgY} receives \eqn{R} together with the scales
+\eqn{s_i}, because Mehler's expansion is an expansion in a correlation (bounded by
+one, which the truncation at order 8 relies on) with the Hermite coefficients of
+\eqn{g(MMU_i + s_i U)}. GLOWr up to 0.3.2, like the legacy code, passed the
+covariance \eqn{M + MVM} into the expansion and its diagonal, a variance, as the
+standard deviation; the \code{_N} weights of those versions differ from the current ones.
 \item \emph{Sparse Mixture Approximation}: Explicitly models the sparse signal
 structure Z_i = Z_0i + Bstar_i * C_i where C_i ~ Bernoulli(PI_i).
 }

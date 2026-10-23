@@ -60,11 +60,21 @@
 #' Two approximation methods are used:
 #'
 #' 1. \emph{Normal Approximation}: Assumes Z-scores are approximately normal
-#'    under the alternative with means MMU and variances M + MVM, where:
+#'    under the alternative, \eqn{\tilde{Z} \sim N(MMU, M + MVM)}, where:
 #'    \itemize{
 #'      \item MMU = M \%*\% MU (marginal means)
 #'      \item MVM = t(M * V) \%*\% M (marginal variance contribution from random effects)
 #'    }
+#'    The moments of \eqn{g(\tilde{Z}_i)} are computed on the standardized scale. With
+#'    \eqn{s_i = \sqrt{(M + MVM)_{ii}}} and the correlation matrix
+#'    \eqn{R = \mathrm{cov2cor}(M + MVM)}, \eqn{\tilde{Z}_i = MMU_i + s_i U_i} with
+#'    \eqn{U \sim N(0, R)}: \code{get_r_tilde} receives the standard deviations
+#'    \eqn{s_i}, and \code{CovM_gXgY} receives \eqn{R} together with the scales
+#'    \eqn{s_i}, because Mehler's expansion is an expansion in a correlation (bounded by
+#'    one, which the truncation at order 8 relies on) with the Hermite coefficients of
+#'    \eqn{g(MMU_i + s_i U)}. GLOWr up to 0.3.2, like the legacy code, passed the
+#'    covariance \eqn{M + MVM} into the expansion and its diagonal, a variance, as the
+#'    standard deviation; the \code{_N} weights of those versions differ from the current ones.
 #'
 #' 2. \emph{Sparse Mixture Approximation}: Explicitly models the sparse signal
 #'    structure Z_i = Z_0i + Bstar_i * C_i where C_i ~ Bernoulli(PI_i).
@@ -226,14 +236,24 @@ Optimal_Weights_M <- function(g, Bstar, PI, M, is.posi.wts = TRUE) {
     # --- General case: Non-Burden tests (GFisher, SKAT, etc.) ---
 
     ## 1. Normal Approximation
-    # Calculate r_tilde: mean differences under normal approximation
-    r_tilde <- get_r_tilde(g, MU = MMU, SD = diag(M + MVM))
+    # Under the alternative, Z~ ~ N(MMU, Sigma_tilde) with Sigma_tilde = M + MVM. The moment
+    # routines (E_gX_p, Mehler's expansion in CovM_gXgY) work on a standard scale, so Z~_i
+    # is handled as MMU_i + SD_tilde_i U_i with U ~ N(0, R_tilde): SD_tilde is the standard
+    # deviation of each Z~_i and R_tilde their correlation matrix, whose entries lie in
+    # [-1, 1] as the truncated expansion requires.
+    Sigma_tilde <- M + MVM
+    SD_tilde <- sqrt(diag(Sigma_tilde))
+    R_tilde <- stats::cov2cor(Sigma_tilde)
+
+    # Calculate r_tilde: mean differences under normal approximation, E[g(Z~_i)] - E[g(Z_0)]
+    r_tilde <- get_r_tilde(g, MU = MMU, SD = SD_tilde)
 
     # Covariance matrices under normal approximation
-    # BE: Under H0 (no signal), means = 0
+    # BE: Under H0 (no signal), means = 0, covariance = M (a correlation matrix already)
     Sigma_BE_tilde <- CovM_gXgY(g, MU1 = rep(0, length(MMU)), MU2 = rep(0, length(MMU)), M = M)
-    # APE: Under H1 (with signal), means = MMU, covariance = M + MVM
-    Sigma_APE_tilde <- CovM_gXgY(g, MU1 = MMU, MU2 = MMU, M = M + MVM)
+    # APE: Under H1 (with signal), means = MMU, correlation R_tilde and scales SD_tilde
+    Sigma_APE_tilde <- CovM_gXgY(g, MU1 = MMU, MU2 = MMU, M = R_tilde,
+                                 SD1 = SD_tilde, SD2 = SD_tilde)
 
     # Calculate weights using normal approximation
     wts_BE_N <- get_wts(Sigma_BE_tilde, r_tilde, is.posi.wts)
@@ -468,34 +488,44 @@ get_r <- function(g, MU, PI) {
 #' @description
 #' Computes the covariance matrix of g(X) and g(Y), where X and Y are
 #' correlated multivariate normal random vectors, using Hermite polynomial
-#' expansion. This is the core function for computing covariances under
-#' the normal approximation.
+#' expansion (Mehler's formula). This is the core function for computing
+#' covariances under the normal approximation.
 #'
 #' @param g Function, transformation to apply to normal random variables
 #' @param MU1 Numeric vector, means of X components
 #' @param MU2 Numeric vector, means of Y components
-#' @param M Numeric matrix, correlation matrix between X and Y (must be positive definite)
+#' @param M Numeric matrix, correlation matrix of the shared standard component Z
+#'   (unit diagonal, must be positive definite). A covariance matrix is not accepted
+#'   here: pass its correlation matrix and its standard deviations through SD1 and SD2.
 #' @param ORD Integer vector, orders of Hermite polynomials to use (default 1:8)
+#' @param SD1 Numeric vector, standard deviations of X components (default all 1)
+#' @param SD2 Numeric vector, standard deviations of Y components (default all 1)
 #'
 #' @return Numeric matrix, covariance matrix where element (i,j) is Cov[g(X_i), g(Y_j)]
 #'
 #' @details
 #' This function computes:
 #' \deqn{Cov[g(X_i), g(Y_j)]}
-#' where X = Z + MU1 ~ MVN(MU1, M) and Y = Z + MU2 ~ MVN(MU2, M), with
-#' Z ~ MVN(0, M) being the shared component.
+#' where \eqn{X_i = MU1_i + SD1_i Z_i} and \eqn{Y_j = MU2_j + SD2_j Z_j}, with
+#' Z ~ MVN(0, M) the shared standard component, so that
+#' \eqn{Cov(X_i, Y_j) = SD1_i SD2_j M_{ij}}. With the default scales, X ~ MVN(MU1, M)
+#' and Y ~ MVN(MU2, M).
 #'
-#' The computation uses the Hermite expansion:
-#' \deqn{g(X) \approx \sum_{k=1}^{K} a_k He_k(X)}
+#' The computation uses the Hermite expansion of the transformed standard variable:
+#' \deqn{g(\mu + s Z) \approx \sum_{k=0}^{K} \frac{a_k(\mu, s)}{k!} He_k(Z), \quad
+#'   a_k(\mu, s) = E[g(\mu + s Z) He_k(Z)], \quad Z \sim N(0, 1),}
 #' where He_k are probabilist's Hermite polynomials.
 #'
-#' The key property used is:
-#' \deqn{Cov[He_k(X_i), He_k(Y_j)] = k! M_{ij}^k}
+#' The key property used (Mehler's formula) is:
+#' \deqn{Cov[He_k(Z_i), He_l(Z_j)] = k! \, M_{ij}^k \, 1(k = l),}
+#' which needs the correlation \eqn{M_{ij}}, bounded by one in absolute value: the terms
+#' \eqn{M_{ij}^k / k!} then decrease and the truncation at order 8 discards the smallest
+#' ones. The expansion is not valid in a covariance with entries above one.
 #'
 #' The algorithm:
 #' \enumerate{
-#'   \item Compute Hermite coefficients for g(X_i) around each mean MU1[i]
-#'   \item Compute Hermite coefficients for g(Y_j) around each mean MU2[j]
+#'   \item Compute Hermite coefficients \eqn{a_k(MU1_i, SD1_i)} for g(X_i)
+#'   \item Compute Hermite coefficients \eqn{a_k(MU2_j, SD2_j)} for g(Y_j)
 #'   \item Sum contributions from each order k: coef1[k,i] * coef2[k,j] * M_ij^k / k!
 #' }
 #'
@@ -540,11 +570,36 @@ get_r <- function(g, MU, PI) {
 #'
 #' @keywords internal
 #' @noRd
-CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8) {
+CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8, SD1 = NULL, SD2 = NULL) {
   # Check that M is positive semi-definite
   check_positive_definite(M, "Correlation matrix M")
 
   n <- length(MU1)
+  if (is.null(SD1)) SD1 <- rep(1, n)
+  if (is.null(SD2)) SD2 <- rep(1, n)
+  if (length(MU2) != n || length(SD1) != n || length(SD2) != n) {
+    stop("MU1, MU2, SD1 and SD2 must have the same length")
+  }
+  if (any(SD1 <= 0) || any(SD2 <= 0)) {
+    stop("SD1 and SD2 must be positive")
+  }
+  if (any(abs(diag(M) - 1) > 1e-8)) {
+    stop("M must be a correlation matrix (unit diagonal); pass cov2cor(Sigma) with SD1 and SD2")
+  }
+
+  # Hermite coefficients of g(mu + s U), U ~ N(0, 1): a_k = E[g(mu + s U) He_k(U)], written
+  # as an integral over x = mu + U (the density and He_k are those of x - mu) so that for
+  # s = 1 the integrand is g(x) itself, as it always was
+  hermite_coefs <- function(mu, s) {
+    sapply(ORD, function(ord) {
+      integrand <- function(x) {
+        xs <- if (s == 1) x else mu + s * (x - mu)
+        g(xs) * dnorm(x - mu) * hermite(x, mu, ord)
+      }
+      # Integrate over +/- 8 standard deviations of U from mu
+      integrate(integrand, mu - 8, mu + 8)$value
+    })
+  }
 
   # Fast path for independent variants (identity correlation matrix)
   # When M is identity, off-diagonal covariances are zero
@@ -554,19 +609,12 @@ CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8) {
                  all(abs(M[row(M) != col(M)]) < 1e-10)
 
   if (is_identity) {
-    # Only compute diagonal variances
+    # Only compute the diagonal, Cov[g(X_i), g(Y_i)] = sum_k a_k(X_i) a_k(Y_i) / k!
+    # (the orthogonality property E[He_k(Z)^2] = k!; a variance when X_i = Y_i)
     diag_vals <- sapply(seq_len(n), function(i) {
-      # Compute Hermite coefficients for g(X) around MU1[i]
-      coef_i <- sapply(ORD, function(ord) {
-        integrand <- function(x) {
-          g(x) * dnorm(x - MU1[i]) * hermite(x, MU1[i], ord)
-        }
-        integrate(integrand, MU1[i] - 8, MU1[i] + 8)$value
-      })
-
-      # Variance = sum of squared coefficients / factorial(ord)
-      # This uses the orthogonality property: E[He_k(X)^2] = k!
-      sum(coef_i^2 / factorial(ORD))
+      coef_x <- hermite_coefs(MU1[i], SD1[i])
+      coef_y <- if (MU2[i] == MU1[i] && SD2[i] == SD1[i]) coef_x else hermite_coefs(MU2[i], SD2[i])
+      sum(coef_x * coef_y / factorial(ORD))
     })
 
     # Handle single variant case (diag() on scalar creates 1x1 matrix)
@@ -577,28 +625,11 @@ CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8) {
 
   # Continue with regular computation for correlated variants
 
-  # Compute Hermite coefficients for g(X) around each mean MU1[i]
-  # coef1[k, i] = integral of g(x) * phi(x - MU1[i]) * He_k(x - MU1[i]) dx
-  coef1 <- sapply(MU1, function(mu) {
-    sapply(ORD, function(ord) {
-      # Integrand: g(x) * density * Hermite polynomial
-      integrand <- function(x) {
-        g(x) * dnorm(x - mu) * hermite(x, mu, ord)
-      }
-      # Integrate over +/- 8 standard deviations from mu
-      integrate(integrand, mu - 8, mu + 8)$value
-    })
-  })
+  # Hermite coefficients for g(X_i): coef1[k, i] = a_k(MU1[i], SD1[i])
+  coef1 <- sapply(seq_len(n), function(i) hermite_coefs(MU1[i], SD1[i]))
 
-  # Compute Hermite coefficients for g(Y) around each mean MU2[j]
-  coef2 <- sapply(MU2, function(mu) {
-    sapply(ORD, function(ord) {
-      integrand <- function(x) {
-        g(x) * dnorm(x - mu) * hermite(x, mu, ord)
-      }
-      integrate(integrand, mu - 8, mu + 8)$value
-    })
-  })
+  # Hermite coefficients for g(Y_j): coef2[k, j] = a_k(MU2[j], SD2[j])
+  coef2 <- sapply(seq_len(n), function(j) hermite_coefs(MU2[j], SD2[j]))
 
   # Initialize output covariance matrix
   M_out <- matrix(0, ncol = n, nrow = n)

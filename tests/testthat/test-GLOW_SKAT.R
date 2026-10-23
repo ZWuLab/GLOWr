@@ -445,9 +445,13 @@ if (legacy_available) {
     expect_equal(result_new$STAT, result_legacy$STAT, tolerance=1e-10,
                  label="Test statistics match legacy")
 
-    # P-values should match exactly
-    expect_equal(result_new$PVAL, result_legacy$PVAL, tolerance=1e-10,
-                 label="P-values match legacy")
+    # P-values: only the equal-weight row is expected to match. The optimal-weight rows
+    # differ by design since GLOWr 0.3.3 (the _N weights are computed on the standardized
+    # scale) and GFisher 0.3.2 (the HYB eigenvalues apply unequal weights once); the legacy
+    # package carries the earlier forms of both.
+    equ <- rownames(result_new$PVAL) == "GLOW_SKAT"
+    expect_equal(result_new$PVAL[equ, ], result_legacy$PVAL[equ, ], tolerance=1e-10,
+                 label="Equal-weight p-value matches legacy")
 
     # Row names should match
     expect_equal(rownames(result_new$STAT), rownames(result_legacy$STAT))
@@ -473,9 +477,10 @@ if (legacy_available) {
     Zout_new <- GLOWr::getZ_marg_score(G, X, Y, trait="continuous")
     result_new <- GLOWr::GLOW_SKAT(marg_score_stats=Zout_new, B=B, PI=PI)
 
-    # Exact match
+    # Exact match of the statistics; of the p-values, the equal-weight row (see above)
     expect_equal(result_new$STAT, result_legacy$STAT, tolerance=1e-10)
-    expect_equal(result_new$PVAL, result_legacy$PVAL, tolerance=1e-10)
+    equ <- rownames(result_new$PVAL) == "GLOW_SKAT"
+    expect_equal(result_new$PVAL[equ, ], result_legacy$PVAL[equ, ], tolerance=1e-10)
   })
 
 
@@ -505,10 +510,11 @@ if (legacy_available) {
       Zout_new <- GLOWr::getZ_marg_score(G, X, Y, trait=trait_type)
       result_new <- GLOWr::GLOW_SKAT(marg_score_stats=Zout_new, B=B, PI=PI)
 
-      # Exact match
+      # Exact match of the statistics; of the p-values, the equal-weight row (see above)
       expect_equal(result_new$STAT, result_legacy$STAT, tolerance=1e-10,
                    label=paste("Scenario", i, "STAT"))
-      expect_equal(result_new$PVAL, result_legacy$PVAL, tolerance=1e-10,
+      equ <- rownames(result_new$PVAL) == "GLOW_SKAT"
+      expect_equal(result_new$PVAL[equ, ], result_legacy$PVAL[equ, ], tolerance=1e-10,
                    label=paste("Scenario", i, "PVAL"))
     }
   })

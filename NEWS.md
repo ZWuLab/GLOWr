@@ -1,3 +1,29 @@
+# GLOWr 0.3.3
+
+- **The normal approximation of `Optimal_Weights_M()` (the `wts_BE_N` and `wts_APE_N`
+  schemes) is computed on the standardized scale.** Under the alternative the Z-scores are
+  approximated by \eqn{\tilde{Z} \sim N(MMU, M + MVM)}, whose covariance has a diagonal above
+  one. The moment routines are written for a standard scale: `get_r_tilde()` takes the
+  standard deviation of each \eqn{\tilde{Z}_i}, and `CovM_gXgY()` applies Mehler's
+  expansion, an expansion in a correlation whose entries are bounded by one, which is what
+  lets the sum stop at order 8. Up to 0.3.2, as in the legacy code, `Optimal_Weights_M()`
+  passed the covariance `M + MVM` into the expansion and its diagonal, a variance, as the
+  standard deviation, so the order-8 term grew with the entries of `M + MVM` instead of
+  shrinking (on the ALS chromosome 21 windows of the report, up to \eqn{10^{23}} times the
+  bound). Reported by Victoria Pan (WPI, 2026-10-23) with a reproducible script. Now
+  `Optimal_Weights_M()` writes \eqn{\tilde{Z}_i = MMU_i + s_i U_i} with
+  \eqn{s_i = \sqrt{(M + MVM)_{ii}}} and \eqn{U \sim N(0, \mathrm{cov2cor}(M + MVM))},
+  `get_r_tilde()` receives \eqn{s_i}, and `CovM_gXgY()` receives the correlation matrix with
+  the scales through its new `SD1` and `SD2` arguments (the Hermite coefficients are those of
+  \eqn{g(MMU_i + s_i U)}); it refuses a matrix without a unit diagonal. Its identity fast
+  path now uses both mean vectors. For \eqn{g(x) = x^2} the result matches the closed forms
+  (`tests/testthat/test-optimal-weights-normal-approx.R`). The `_N` weights change wherever
+  `MVM` is not zero, that is wherever some `PI` lies strictly between 0 and 1; the `_sparse`
+  and Burden weights and every test statistic are unchanged. The p-values of the
+  optimal-weight tests also change through GFisher 0.3.2, whose HYB method applied unequal
+  weights twice (its NEWS); the equal-weight tests `GLOW_SKAT` and `GLOW_Fisher` are
+  unaffected by either.
+
 # GLOWr 0.3.2
 
 - **The promoter masks no longer ask for `GenomeInfoDb`.** Since Bioconductor 3.22 the
