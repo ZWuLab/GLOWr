@@ -71,13 +71,36 @@
 #'    \eqn{U \sim N(0, R)}: \code{get_r_tilde} receives the standard deviations
 #'    \eqn{s_i}, and \code{CovM_gXgY} receives \eqn{R} together with the scales
 #'    \eqn{s_i}, because Mehler's expansion is an expansion in a correlation (bounded by
-#'    one, which the truncation at order 8 relies on) with the Hermite coefficients of
+#'    one, which the truncation at order 64 relies on) with the Hermite coefficients of
 #'    \eqn{g(MMU_i + s_i U)}. GLOWr up to 0.3.2, like the legacy code, passed the
 #'    covariance \eqn{M + MVM} into the expansion and its diagonal, a variance, as the
 #'    standard deviation; the \code{_N} weights of those versions differ from the current ones.
 #'
 #' 2. \emph{Sparse Mixture Approximation}: Explicitly models the sparse signal
 #'    structure Z_i = Z_0i + Bstar_i * C_i where C_i ~ Bernoulli(PI_i).
+#'
+#' \strong{Numerical integration and the expansion order:}
+#'
+#' Every expectation of \eqn{g} is a one-dimensional integral against the standard normal
+#' density. It is computed by a composite 10-point Gauss-Legendre rule on \eqn{[-12, 12]}
+#' with panels of width 0.1, cut at the point where the argument of \eqn{g} is zero (the
+#' kink of the two-sided transforms, which depend on \eqn{|x|}). The Hermite coefficients
+#' \eqn{b_k = E[g(\mu + sU)\,he_k(U)]} come from one evaluation of \eqn{g} per distinct
+#' \eqn{(\mu, s)} pair, and Mehler's expansion
+#' \eqn{\mathrm{Cov}\{g(\mu_i + s_iU_i), g(\mu_j + s_jU_j)\} = \sum_k b_k(i)b_k(j)r_{ij}^k}
+#' runs to order 64. The truncated sum is the covariance of the projected transform, and its
+#' diagonal is the truncated variance; the sparse covariance carries the exact mixture
+#' variance on its diagonal instead, because the mixture formula does not apply to a variant
+#' with itself. Against a direct integration of every pairwise covariance on a 20-variant
+#' window with a near-duplicate pair, the weights of the normal approximation agree to
+#' \eqn{10^{-3}} of the largest weight and the sparse weights to \eqn{5 \times 10^{-3}}
+#' (the package tests). GLOWr up to 0.3.3 used \code{integrate()} at its default tolerance
+#' and order 8; on that window its \code{_N} weights were off by \eqn{9 \times 10^{-2}}.
+#'
+#' The rule is validated for the Fisher and polynomial transforms over the scales GLOW meets.
+#' A custom \code{g} must be vectorized, square-integrable against the normal density and
+#' smooth except possibly at zero; a transform with another kink, a cusp, a discontinuity or
+#' rapid growth needs its own convergence check.
 #'
 #' For each approximation, weights are computed under two hypotheses:
 #' \itemize{
@@ -93,12 +116,14 @@
 #' @section Computational Complexity:
 #' \itemize{
 #'   \item Burden/Liptak: O(n^3) for matrix inversion
-#'   \item Other tests: O(4 * n^2 * K * n_eval + n^3) where:
+#'   \item Other tests: O(n_pairs * n_nodes * K + 4 * n^2 * K + n^3) where:
 #'     \itemize{
 #'       \item n = number of variants
-#'       \item K = number of Hermite polynomial orders (8)
-#'       \item n_eval = cost per numerical integration
-#'       \item Factor of 4 from normal + sparse approximations, each under H0 and H1
+#'       \item n_pairs = distinct (mean, scale) pairs, at most 2n + 1
+#'       \item n_nodes = quadrature nodes per pair (2,410)
+#'       \item K = number of Hermite polynomial orders (64)
+#'       \item Factor of 4 from the four Mehler sums (the null, the normal-approximation
+#'         alternative, and two sparse components)
 #'     }
 #' }
 #'
@@ -108,7 +133,8 @@
 #'   \item M is a valid correlation matrix (positive definite, diagonal = 1)
 #'   \item 0 <= PI_i <= 1 for all i
 #'   \item Bstar values are positive (standardized effect sizes)
-#'   \item For non-Burden tests, g is a smooth function suitable for Hermite expansion
+#'   \item For non-Burden tests, g(mu + s U) is square-integrable under the normal density
+#'     and smooth except possibly at zero (see the details)
 #' }
 #'
 #' @section Weight Interpretation:
@@ -235,43 +261,18 @@ Optimal_Weights_M <- function(g, Bstar, PI, M, is.posi.wts = TRUE) {
   } else {
     # --- General case: Non-Burden tests (GFisher, SKAT, etc.) ---
 
-    ## 1. Normal Approximation
-    # Under the alternative, Z~ ~ N(MMU, Sigma_tilde) with Sigma_tilde = M + MVM. The moment
-    # routines (E_gX_p, Mehler's expansion in CovM_gXgY) work on a standard scale, so Z~_i
-    # is handled as MMU_i + SD_tilde_i U_i with U ~ N(0, R_tilde): SD_tilde is the standard
-    # deviation of each Z~_i and R_tilde their correlation matrix, whose entries lie in
-    # [-1, 1] as the truncated expansion requires.
-    Sigma_tilde <- M + MVM
-    SD_tilde <- sqrt(diag(Sigma_tilde))
-    R_tilde <- stats::cov2cor(Sigma_tilde)
+    ## 1 and 2. The normal approximation and the sparse mixture, from one coefficient
+    ## table over the null pair (0, 1), the normal-approximation pairs (MMU_i, s_i) and the
+    ## sparse pairs (Bstar_i, 1): see .optimal_weight_moments()
+    mom <- .optimal_weight_moments(g, Bstar, PI, M)
 
-    # Calculate r_tilde: mean differences under normal approximation, E[g(Z~_i)] - E[g(Z_0)]
-    r_tilde <- get_r_tilde(g, MU = MMU, SD = SD_tilde)
+    # Weights under the normal approximation (BE: the null covariance; APE: the alternative's)
+    wts_BE_N <- get_wts(mom$Sigma_BE_N, mom$r_N, is.posi.wts)
+    wts_APE_N <- get_wts(mom$Sigma_APE_N, mom$r_N, is.posi.wts)
 
-    # Covariance matrices under normal approximation
-    # BE: Under H0 (no signal), means = 0, covariance = M (a correlation matrix already)
-    Sigma_BE_tilde <- CovM_gXgY(g, MU1 = rep(0, length(MMU)), MU2 = rep(0, length(MMU)), M = M)
-    # APE: Under H1 (with signal), means = MMU, correlation R_tilde and scales SD_tilde
-    Sigma_APE_tilde <- CovM_gXgY(g, MU1 = MMU, MU2 = MMU, M = R_tilde,
-                                 SD1 = SD_tilde, SD2 = SD_tilde)
-
-    # Calculate weights using normal approximation
-    wts_BE_N <- get_wts(Sigma_BE_tilde, r_tilde, is.posi.wts)
-    wts_APE_N <- get_wts(Sigma_APE_tilde, r_tilde, is.posi.wts)
-
-    ## 2. Sparse Mixture Approximation
-    # Calculate r: mean differences under sparse mixture model
-    r <- get_r(g, Bstar, PI)
-
-    # Covariance matrices under sparse mixture approximation
-    # BE: Under H0 (no signal)
-    Sigma_BE <- get_Sigma(g, Bstar, PI, M, hypo = "H0")
-    # APE: Under H1 (with signal)
-    Sigma_APE <- get_Sigma(g, Bstar, PI, M, hypo = "H1")
-
-    # Calculate weights using sparse approximation
-    wts_BE_sparse <- get_wts(Sigma_BE, r, is.posi.wts)
-    wts_APE_sparse <- get_wts(Sigma_APE, r, is.posi.wts)
+    # Weights under the sparse mixture approximation
+    wts_BE_sparse <- get_wts(mom$Sigma_BE_sparse, mom$r_sparse, is.posi.wts)
+    wts_APE_sparse <- get_wts(mom$Sigma_APE_sparse, mom$r_sparse, is.posi.wts)
 
     # Return all four sets of weights
     return(list(
@@ -412,13 +413,10 @@ get_wts <- function(Sigma, r, is.posi.wts = TRUE) {
 #' @keywords internal
 #' @noRd
 get_r_tilde <- function(g, MU, SD) {
-  n <- length(MU)
-  # For each i, compute E[g(Z_i)] - E[g(Z_0)]
-  # where Z_i ~ N(MU[i], SD[i]^2) and Z_0 ~ N(0, 1)
-  r_tilde <- sapply(1:n, function(i) {
-    E_gX_p(g, mu = MU[i], p = 1, sigma = SD[i]) - E_gX_p(g, mu = 0, p = 1, sigma = 1)
-  })
-  return(r_tilde)
+  # E[g(Z_0)] once, then E[g(Z_i)] - E[g(Z_0)] with Z_i ~ N(MU[i], SD[i]^2)
+  e0 <- E_gX_p(g, mu = 0, p = 1, sigma = 1)
+  vapply(seq_along(MU), function(i) E_gX_p(g, mu = MU[i], p = 1, sigma = SD[i]),
+         numeric(1)) - e0
 }
 
 
@@ -497,7 +495,8 @@ get_r <- function(g, MU, PI) {
 #' @param M Numeric matrix, correlation matrix of the shared standard component Z
 #'   (unit diagonal, must be positive definite). A covariance matrix is not accepted
 #'   here: pass its correlation matrix and its standard deviations through SD1 and SD2.
-#' @param ORD Integer vector, orders of Hermite polynomials to use (default 1:8)
+#' @param ORD Integer vector, the orders of the Hermite expansion summed (default 1:64;
+#'   \code{1:8} reproduces the order-8 expansion of GLOWr 0.3.3)
 #' @param SD1 Numeric vector, standard deviations of X components (default all 1)
 #' @param SD2 Numeric vector, standard deviations of Y components (default all 1)
 #'
@@ -519,30 +518,36 @@ get_r <- function(g, MU, PI) {
 #' The key property used (Mehler's formula) is:
 #' \deqn{Cov[He_k(Z_i), He_l(Z_j)] = k! \, M_{ij}^k \, 1(k = l),}
 #' which needs the correlation \eqn{M_{ij}}, bounded by one in absolute value: the terms
-#' \eqn{M_{ij}^k / k!} then decrease and the truncation at order 8 discards the smallest
-#' ones. The expansion is not valid in a covariance with entries above one.
+#' \eqn{M_{ij}^k / k!} then decrease and the truncation at order 64 discards the smallest
+#' ones. The expansion is not valid in a covariance with entries above one. The truncated
+#' sum is the covariance of the projection of \eqn{g} onto the polynomials of degree at
+#' most \eqn{K}, so its diagonal is the truncated variance \eqn{\sum_k a_k^2 / k!}.
 #'
 #' The algorithm:
 #' \enumerate{
-#'   \item Compute Hermite coefficients \eqn{a_k(MU1_i, SD1_i)} for g(X_i)
-#'   \item Compute Hermite coefficients \eqn{a_k(MU2_j, SD2_j)} for g(Y_j)
-#'   \item Sum contributions from each order k: coef1[k,i] * coef2[k,j] * M_ij^k / k!
+#'   \item Compute the normalized Hermite coefficients \eqn{b_k = a_k / \sqrt{k!}} of
+#'     \eqn{g(\mu + sU)} for each distinct (mean, scale) pair among the X and Y
+#'     components, by the composite Gauss-Legendre rule of
+#'     \code{optimal_weights_quadrature.R} (one evaluation of g per pair)
+#'   \item Sum the contributions of each order k in ORD: b1[k,i] * b2[k,j] * M_ij^k
 #' }
 #'
 #' @section Computational Complexity:
 #' O(n^2 * K * n_eval) for correlated variants, O(n * K * n_eval) for independent variants:
 #' \itemize{
 #'   \item n = length(MU1) = length(MU2)
-#'   \item K = length(ORD) (typically 8)
-#'   \item n_eval = cost per numerical integration
+#'   \item K = max(ORD) (64 by default)
+#'   \item n_eval = cost per numerical integration (2,410 evaluations of g per distinct pair)
 #'   \item Fast path optimization when M is identity matrix
 #' }
 #'
 #' @section Numerical Considerations:
 #' \itemize{
-#'   \item Higher order terms (ORD > 8) may be unstable
-#'   \item Integration performed over +/- 8 standard deviations
-#'   \item Assumes g is sufficiently smooth for Hermite expansion
+#'   \item The Hermite functions come from their three-term recurrence, stable to order 64
+#'     and beyond on the quadrature domain
+#'   \item Integration over [-12, 12] standard deviations, cut where the argument of g is
+#'     zero (the kink of the two-sided transforms)
+#'   \item Assumes g(mu + s U) square-integrable and smooth away from zero
 #'   \item Fast path for independent variants (identity correlation matrix)
 #' }
 #'
@@ -570,7 +575,7 @@ get_r <- function(g, MU, PI) {
 #'
 #' @keywords internal
 #' @noRd
-CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8, SD1 = NULL, SD2 = NULL) {
+CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:64, SD1 = NULL, SD2 = NULL) {
   # Check that M is positive semi-definite
   check_positive_definite(M, "Correlation matrix M")
 
@@ -586,64 +591,26 @@ CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8, SD1 = NULL, SD2 = NULL) {
   if (any(abs(diag(M) - 1) > 1e-8)) {
     stop("M must be a correlation matrix (unit diagonal); pass cov2cor(Sigma) with SD1 and SD2")
   }
+  ORD <- .check_ord(ORD)
 
-  # Hermite coefficients of g(mu + s U), U ~ N(0, 1): a_k = E[g(mu + s U) He_k(U)], written
-  # as an integral over x = mu + U (the density and He_k are those of x - mu) so that for
-  # s = 1 the integrand is g(x) itself, as it always was
-  hermite_coefs <- function(mu, s) {
-    sapply(ORD, function(ord) {
-      integrand <- function(x) {
-        xs <- if (s == 1) x else mu + s * (x - mu)
-        g(xs) * dnorm(x - mu) * hermite(x, mu, ord)
-      }
-      # Integrate over +/- 8 standard deviations of U from mu
-      integrate(integrand, mu - 8, mu + 8)$value
-    })
-  }
+  # Normalized Hermite coefficients b_k = E[g(mu + s U) he_k(U)] of every distinct
+  # (mean, scale) pair among the X and Y components, one evaluation of g per pair
+  tab <- .hermite_table(g, c(MU1, MU2), c(SD1, SD2), max(ORD))
+  B1 <- tab$b[, seq_len(n), drop = FALSE]          # row k + 1 holds order k, column i: X_i
+  B2 <- tab$b[, n + seq_len(n), drop = FALSE]      # column j: Y_j
 
-  # Fast path for independent variants (identity correlation matrix)
-  # When M is identity, off-diagonal covariances are zero
-  # This avoids expensive Hermite expansion for off-diagonals
+  # Fast path for independent variants (identity correlation matrix): only the
+  # diagonal survives, Cov[g(X_i), g(Y_i)] = sum_k b_k(X_i) b_k(Y_i)
   is_identity <- (nrow(M) == ncol(M)) &&
                  all(abs(diag(M) - 1) < 1e-10) &&
                  all(abs(M[row(M) != col(M)]) < 1e-10)
-
   if (is_identity) {
-    # Only compute the diagonal, Cov[g(X_i), g(Y_i)] = sum_k a_k(X_i) a_k(Y_i) / k!
-    # (the orthogonality property E[He_k(Z)^2] = k!; a variance when X_i = Y_i)
-    diag_vals <- sapply(seq_len(n), function(i) {
-      coef_x <- hermite_coefs(MU1[i], SD1[i])
-      coef_y <- if (MU2[i] == MU1[i] && SD2[i] == SD1[i]) coef_x else hermite_coefs(MU2[i], SD2[i])
-      sum(coef_x * coef_y / factorial(ORD))
-    })
-
-    # Handle single variant case (diag() on scalar creates 1x1 matrix)
-    M_out <- diag(diag_vals, nrow = n, ncol = n)
-
-    return(M_out)
+    diag_vals <- colSums(B1[ORD + 1L, , drop = FALSE] * B2[ORD + 1L, , drop = FALSE])
+    return(diag(diag_vals, nrow = n, ncol = n))
   }
 
-  # Continue with regular computation for correlated variants
-
-  # Hermite coefficients for g(X_i): coef1[k, i] = a_k(MU1[i], SD1[i])
-  coef1 <- sapply(seq_len(n), function(i) hermite_coefs(MU1[i], SD1[i]))
-
-  # Hermite coefficients for g(Y_j): coef2[k, j] = a_k(MU2[j], SD2[j])
-  coef2 <- sapply(seq_len(n), function(j) hermite_coefs(MU2[j], SD2[j]))
-
-  # Initialize output covariance matrix
-  M_out <- matrix(0, ncol = n, nrow = n)
-
-  # Sum over Hermite polynomial orders
-  for (i in seq_along(ORD)) {
-    ord <- ORD[i]
-    # Contribution from order 'ord':
-    # Cov[He_ord(X_i), He_ord(Y_j)] = ord! * M_ij^ord
-    # So Cov[g(X_i), g(Y_j)] gets contribution: coef1[ord, i] * coef2[ord, j] * M_ij^ord / ord!
-    M_out <- M_out + as.matrix(coef1[ord, ]) %*% t(as.matrix(coef2[ord, ])) * M^ord / factorial(ord)
-  }
-
-  return(M_out)
+  # Mehler's expansion: Cov[g(X_i), g(Y_j)] = sum_{k in ORD} b_k(X_i) b_k(Y_j) M_ij^k
+  .mehler_sum(B1, B2, M, ORD)
 }
 
 
@@ -658,7 +625,7 @@ CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8, SD1 = NULL, SD2 = NULL) {
 #' @param MU Numeric vector, effect sizes (B-star values)
 #' @param PI Numeric vector, variant-importance scores
 #' @param M Numeric matrix, correlation matrix of null Z-scores
-#' @param ORD Integer vector, orders of Hermite polynomials to use (default 1:8)
+#' @param ORD Integer vector, the orders of the Hermite expansion summed (default 1:64)
 #'
 #' @return Numeric matrix, covariance matrix where element (i,j) is Cov[g(Z_i), g(Z_j)]
 #'
@@ -723,82 +690,64 @@ CovM_gXgY <- function(g, MU1, MU2, M, ORD = 1:8, SD1 = NULL, SD2 = NULL) {
 #'
 #' @keywords internal
 #' @noRd
-CovMT_mix <- function(g, MU, PI, M, ORD = 1:8) {
+CovMT_mix <- function(g, MU, PI, M, ORD = 1:64) {
   # Check that M is positive semi-definite
   check_positive_definite(M, "Correlation matrix M")
 
   n <- length(MU)
+  ORD <- .check_ord(ORD)
+  K <- max(ORD)
 
-  # Create probability matrices for the four combinations
-  PI_M <- PI %*% t(PI)             # P(C_i=1, C_j=1) = pi_i * pi_j
-  PI_M1 <- PI %*% t(1 - PI)        # P(C_i=1, C_j=0) = pi_i * (1-pi_j)
-  PI_M2 <- t(PI_M1)                # P(C_i=0, C_j=1) = (1-pi_i) * pi_j
-  PI_M3 <- (1 - PI) %*% t(1 - PI)  # P(C_i=0, C_j=0) = (1-pi_i) * (1-pi_j)
+  # One coefficient table: the causal pairs (MU_i, 1) and the null pair (0, 1)
+  tab <- .hermite_table(g, c(MU, 0), rep(1, n + 1L), K)
+  B1 <- tab$b[, seq_len(n), drop = FALSE]      # coefficients of g(MU_i + U)
+  b0 <- tab$b[, n + 1L]                        # coefficients of g(U)
+  B0 <- matrix(b0, K + 1L, n)
 
-  # Compute covariance matrices for each combination of causal status
-  # Cov_M: Both i and j are causal (means = MU for both)
-  Cov_M <- CovM_gXgY(g, MU, MU, M, ORD = 1:8)
+  # Covariances of the four causal combinations (i causal / j causal, i causal / j null,
+  # and the null pair; the null / causal case is the transpose)
+  Cov_M  <- .mehler_sum(B1, B1, M, ORD)
+  Cov_M1 <- .mehler_sum(B1, B0, M, ORD)
 
-  # Cov_M1: i is causal (mean = MU), j is null (mean = 0)
-  Cov_M1 <- CovM_gXgY(g, MU, rep(0, n), M, ORD = 1:8)
-
-  # Cov_M2: i is null (mean = 0), j is causal (mean = MU)
-  Cov_M2 <- t(Cov_M1)
-
-  # Cov_M3: Both i and j are null (means = 0 for both)
-  # This is expensive to compute but identical for all calls with same M and g
-  # Use caching if enabled
+  # The null covariance Cov_M3 is identical for every call with the same null
+  # coefficients, M and orders, so it is cached under a key of those numerical inputs
+  # (a key from the body of g would not see the values a closure captures, and a key
+  # from a probe of g would not tell two transforms apart that agree at the probes)
   use_cache <- getOption("GLOWr.use_cache", default = TRUE)
-
+  Cov_M3 <- NULL
   if (use_cache) {
-    # Generate cache key based on g function body and M
     cache_key <- tryCatch({
-      digest::digest(list(
-        g_body = body(g),
-        g_formals = formals(g),
-        M = M,
-        type = "H0_covariance"
-      ), algo = "xxhash64")
+      digest::digest(list(b0 = b0, M = M, ORD = ORD, type = "H0_covariance"),
+                     algo = "xxhash64")
     }, error = function(e) {
       warning("Cache key generation failed: ", e$message,
               ". Falling back to no caching.", call. = FALSE)
       NULL
     })
-
-    # Try to use cache
     if (!is.null(cache_key)) {
-      if (exists(cache_key, envir = .glow_cache)) {
-        # Cache hit
+      if (exists(cache_key, envir = .glow_cache, inherits = FALSE)) {
         Cov_M3 <- get(cache_key, envir = .glow_cache)
       } else {
-        # Cache miss - compute and store
-        Cov_M3 <- tryCatch({
-          result <- CovM_gXgY(g, rep(0, n), rep(0, n), M, ORD = 1:8)
-          assign(cache_key, result, envir = .glow_cache)
-          result
-        }, error = function(e) {
-          warning("Caching failed: ", e$message,
-                  ". Computing without caching.", call. = FALSE)
-          CovM_gXgY(g, rep(0, n), rep(0, n), M, ORD = 1:8)
-        })
+        Cov_M3 <- .mehler_sum(B0, B0, M, ORD)
+        assign(cache_key, Cov_M3, envir = .glow_cache)
       }
-    } else {
-      # Cache key generation failed, compute without caching
-      Cov_M3 <- CovM_gXgY(g, rep(0, n), rep(0, n), M, ORD = 1:8)
     }
-  } else {
-    # Caching disabled by user
-    Cov_M3 <- CovM_gXgY(g, rep(0, n), rep(0, n), M, ORD = 1:8)
   }
+  if (is.null(Cov_M3)) Cov_M3 <- .mehler_sum(B0, B0, M, ORD)
 
-  # Weighted sum of covariance matrices
-  M_out <- PI_M * Cov_M + PI_M1 * Cov_M1 + PI_M2 * Cov_M2 + PI_M3 * Cov_M3
+  # Weighted sum over the causal combinations, P(C_i = a, C_j = b) = pi_i^a (1-pi_i)^(1-a) ...
+  M_out <- outer(PI, PI) * Cov_M + outer(PI, 1 - PI) * Cov_M1 +
+           outer(1 - PI, PI) * t(Cov_M1) + outer(1 - PI, 1 - PI) * Cov_M3
 
-  # Replace diagonal elements with exact variance calculations
-  # This avoids numerical issues from Hermite expansion on the diagonal
-  diag(M_out) <- sapply(1:n, function(i) Var_T_mix(g, MU[i], PI[i]))
+  # The diagonal is the mixture's own variance (the sum above would treat C_i as
+  # independent of itself), by the law of total variance:
+  # (1 - pi) Var_0 + pi Var_1 + pi (1 - pi) (E_1 - E_0)^2, with centered variances
+  E1 <- B1[1L, ]
+  E0 <- b0[1L]
+  diag(M_out) <- (1 - PI) * tab$Var[n + 1L] + PI * tab$Var[seq_len(n)] +
+                 PI * (1 - PI) * (E1 - E0)^2
 
-  return(M_out)
+  M_out
 }
 
 
@@ -891,7 +840,7 @@ get_Sigma <- function(g, MU, PI, M, hypo = "H1") {
 #'
 #' @param x Numeric vector of evaluation points
 #' @param mu Numeric scalar, shift parameter (typically the mean)
-#' @param ord Integer, order of the Hermite polynomial (1 through 8)
+#' @param ord Integer, order of the Hermite polynomial (a positive integer)
 #'
 #' @return Numeric vector of Hermite polynomial values evaluated at x
 #'
@@ -951,29 +900,22 @@ get_Sigma <- function(g, MU, PI, M, hypo = "H1") {
 #' @keywords internal
 #' @noRd
 hermite <- function(x, mu, ord) {
-  # Compute shifted variable
-  y <- x - mu
-
-  # Return appropriate Hermite polynomial based on order
-  if (ord == 1) {
-    return(y)
-  } else if (ord == 2) {
-    return(y^2 - 1)
-  } else if (ord == 3) {
-    return(y^3 - 3*y)
-  } else if (ord == 4) {
-    return(y^4 - 6*y^2 + 3)
-  } else if (ord == 5) {
-    return(y^5 - 10*y^3 + 15*y)
-  } else if (ord == 6) {
-    return(y^6 - 15*y^4 + 45*y^2 - 15)
-  } else if (ord == 7) {
-    return(y^7 - 21*y^5 + 105*y^3 - 105*y)
-  } else if (ord == 8) {
-    return(y^8 - 28*y^6 + 210*y^4 - 420*y^2 + 105)
-  } else {
-    stop("Hermite polynomial order must be between 1 and 8")
+  if (!is.numeric(ord) || length(ord) != 1L || !is.finite(ord) || ord < 1 ||
+      ord != round(ord)) {
+    stop("Hermite polynomial order must be a positive integer")
   }
+  # Three-term recurrence He_{k+1}(y) = y He_k(y) - k He_{k-1}(y) from He_0 = 1, He_1 = y
+  y <- x - mu
+  h_prev <- rep(1, length(y))
+  h <- y
+  if (ord >= 2) {
+    for (k in seq_len(ord - 1)) {
+      h_next <- y * h - k * h_prev
+      h_prev <- h
+      h <- h_next
+    }
+  }
+  h
 }
 
 
@@ -997,9 +939,10 @@ hermite <- function(x, mu, ord) {
 #' where \eqn{f(x)} is the normal density with mean \eqn{\mu} and
 #' standard deviation \eqn{\sigma}.
 #'
-#' The integration is performed over the range \eqn{[\mu - 8\sigma, \mu + 8\sigma]},
-#' which captures virtually all probability mass (> 99.9999%) for a normal
-#' distribution.
+#' The integration uses the composite Gauss-Legendre rule of
+#' \code{optimal_weights_quadrature.R}: the standardized range \eqn{[-12, 12]} in panels
+#' of width 0.1, cut where the argument of g is zero (the kink of the two-sided
+#' transforms).
 #'
 #' Common use cases:
 #' \itemize{
@@ -1008,15 +951,14 @@ hermite <- function(x, mu, ord) {
 #' }
 #'
 #' @section Computational Complexity:
-#' O(n_eval) where n_eval is the number of function evaluations needed by
-#' the adaptive quadrature algorithm (typically 100-500)
+#' O(n_eval) with n_eval = 2,410 evaluations of g (one vectorized call)
 #'
 #' @section Numerical Considerations:
 #' \itemize{
-#'   \item Uses adaptive quadrature via \code{integrate()}
-#'   \item Integration bounds chosen to capture > 99.9999% of normal mass
-#'   \item May have issues if g(x) has sharp discontinuities
-#'   \item Default tolerances from \code{integrate()} are used
+#'   \item A fixed composite Gauss-Legendre rule, deterministic and exact for polynomials
+#'   \item Validated for the Fisher and polynomial transforms; a transform with a kink away
+#'     from zero, a cusp, a discontinuity or rapid growth needs its own convergence check
+#'   \item A non-finite value of g, or a non-finite moment, is an error
 #' }
 #'
 #' @examples
@@ -1036,21 +978,29 @@ hermite <- function(x, mu, ord) {
 #' @keywords internal
 #' @noRd
 E_gX_p <- function(g, mu, p, sigma = 1) {
-  # Define the integrand: g(x)^p * f(x) where f is normal density
-  # We integrate over the standardized scale and adjust the density
-  integrand <- function(x) {
-    g(x)^p * dnorm((x - mu) / sigma)
+  if (!is.numeric(sigma) || length(sigma) != 1L || !is.finite(sigma) || sigma <= 0) {
+    stop("sigma must be a single finite positive number")
   }
-
-  # Integration bounds: mu +/- 8*sigma captures > 99.9999% of mass
-  lower <- mu - 8 * sigma
-  upper <- mu + 8 * sigma
-
-  # Perform numerical integration
-  # Divide by sigma to account for the scaling in the density
-  result <- integrate(integrand, lower, upper)$value / sigma
-
-  return(result)
+  # Nodes on the standardized scale, cut where mu + sigma * u = 0
+  nd <- .normal_nodes(cut = -mu / sigma)
+  x <- mu + sigma * nd$x
+  gx <- g(x)
+  if (length(gx) != length(x)) {
+    stop("The transformation g must return one value per input (", length(x),
+         " inputs, ", length(gx), " values).", call. = FALSE)
+  }
+  bad <- which(!is.finite(gx))
+  if (length(bad)) {
+    stop("The transformation g returned a non-finite value at x = ", format(x[bad[1L]]),
+         " (mu = ", format(mu), ", sigma = ", format(sigma), ").", call. = FALSE)
+  }
+  value <- sum(gx^p * stats::dnorm(nd$x) * nd$w)
+  if (!is.finite(value)) {
+    stop("E[g(X)^", p, "] is not finite (mu = ", format(mu), ", sigma = ", format(sigma),
+         "): the transformation grows too fast for the fixed quadrature domain.",
+         call. = FALSE)
+  }
+  value
 }
 
 
@@ -1160,16 +1110,97 @@ E_T_mix <- function(g, mu, pi) {
 #' @keywords internal
 #' @noRd
 Var_T_mix <- function(g, mu, pi) {
-  # E[T^2] for the mixture
-  E_T2 <- pi * E_gX_p(g, mu, 2) + (1 - pi) * E_gX_p(g, 0, 2)
+  # Law of total variance over the causal indicator C ~ Bernoulli(pi):
+  # Var[T] = pi Var_1 + (1 - pi) Var_0 + pi (1 - pi) (E_1 - E_0)^2, where E_a and Var_a
+  # are the mean and the (centered) variance of g(a mu + Z_0), so that a large mean does
+  # not cancel against a large second moment
+  m1 <- .hermite_moments(g, mu, 1, 0L)
+  m0 <- .hermite_moments(g, 0, 1, 0L)
+  pi * m1$Var + (1 - pi) * m0$Var + pi * (1 - pi) * (m1$b[1L] - m0$b[1L])^2
+}
 
-  # E[T] for the mixture
-  E_T <- E_T_mix(g, mu, pi)
 
-  # Var[T] = E[T^2] - (E[T])^2
-  variance <- E_T2 - E_T^2
+#' Validate the orders of the Hermite expansion
+#'
+#' @param ORD Integer vector of positive integers (the orders summed).
+#' @return The orders as a sorted integer vector without duplicates.
+#' @keywords internal
+#' @noRd
+.check_ord <- function(ORD) {
+  if (!is.numeric(ORD) || length(ORD) == 0L || any(!is.finite(ORD)) || any(ORD < 1) ||
+      any(ORD != round(ORD))) {
+    stop("ORD must be a vector of positive integers (the orders of the Hermite expansion)")
+  }
+  sort(unique(as.integer(ORD)))
+}
 
-  return(variance)
+#' The moments behind the four optimal-weight schemes, from one coefficient table
+#'
+#' @description
+#' For a non-Burden transformation \code{g}, computes everything \code{Optimal_Weights_M()}
+#' needs: the mean-difference vectors and the covariance matrices of the normal
+#' approximation (\code{_N}) and of the sparse mixture (\code{_sparse}), under the null
+#' (BE) and the alternative (APE). The Hermite coefficients of every distinct
+#' (mean, scale) pair among the null pair (0, 1), the normal-approximation pairs
+#' \eqn{(MMU_i, s_i)} and the sparse pairs \eqn{(Bstar_i, 1)} are computed once, and four
+#' Mehler sums follow. The values equal those of \code{get_r_tilde()},
+#' \code{CovM_gXgY()}, \code{get_r()} and \code{get_Sigma()} called one by one.
+#'
+#' @param g Function, the transformation.
+#' @param Bstar,PI,M As in \code{Optimal_Weights_M()}.
+#' @param ORD Integer vector, the orders of the Hermite expansion summed (default 1:64).
+#' @return A list: \code{r_N}, \code{Sigma_BE_N}, \code{Sigma_APE_N}, \code{r_sparse},
+#'   \code{Sigma_BE_sparse}, \code{Sigma_APE_sparse}.
+#' @keywords internal
+#' @noRd
+.optimal_weight_moments <- function(g, Bstar, PI, M, ORD = 1:64) {
+  n <- length(Bstar)
+  ORD <- .check_ord(ORD)
+  K <- max(ORD)
+
+  # The normal approximation: Z~ ~ N(MMU, M + MVM), handled as MMU_i + s_i U_i with
+  # U ~ N(0, R), R the correlation matrix of M + MVM (the expansion needs a correlation)
+  MU <- Bstar * PI
+  V <- Bstar^2 * PI * (1 - PI)
+  MMU <- as.vector(M %*% MU)
+  Sigma_tilde <- M + t(M * V) %*% M
+  SD_tilde <- sqrt(diag(Sigma_tilde))
+  R_tilde <- stats::cov2cor(Sigma_tilde)
+
+  # One table: column 1 the null pair, then the normal-approximation pairs, then the
+  # sparse pairs (each distinct pair integrated once)
+  tab <- .hermite_table(g, c(0, MMU, Bstar), c(1, SD_tilde, rep(1, n)), K)
+  b0 <- tab$b[, 1L]
+  B_N <- tab$b[, 1L + seq_len(n), drop = FALSE]
+  B_S <- tab$b[, 1L + n + seq_len(n), drop = FALSE]
+  B0 <- matrix(b0, K + 1L, n)
+
+  # Normal approximation: r_i = E[g(Z~_i)] - E[g(Z_0)]; the null covariance (truncated
+  # series in M, the same matrix that the sparse scheme uses as its null component) and
+  # the alternative covariance (the series in R with the stretched coefficients)
+  r_N <- B_N[1L, ] - b0[1L]
+  Sigma_null <- .mehler_sum(B0, B0, M, ORD)
+  Sigma_APE_N <- .mehler_sum(B_N, B_N, R_tilde, ORD)
+
+  # Sparse mixture: Z_i = Z_0i + Bstar_i C_i, C_i ~ Bernoulli(PI_i); the off-diagonals
+  # from the four causal combinations, the diagonal the mixture's own variance (the law
+  # of total variance with centered variances), as in CovMT_mix()
+  Cov_11 <- .mehler_sum(B_S, B_S, M, ORD)
+  Cov_10 <- .mehler_sum(B_S, B0, M, ORD)
+  Sigma_APE_sparse <- outer(PI, PI) * Cov_11 + outer(PI, 1 - PI) * Cov_10 +
+                      outer(1 - PI, PI) * t(Cov_10) + outer(1 - PI, 1 - PI) * Sigma_null
+  E1 <- B_S[1L, ]
+  E0 <- b0[1L]
+  Var1 <- tab$Var[1L + n + seq_len(n)]
+  Var0 <- tab$Var[1L]
+  diag(Sigma_APE_sparse) <- (1 - PI) * Var0 + PI * Var1 + PI * (1 - PI) * (E1 - E0)^2
+  Sigma_BE_sparse <- Sigma_null
+  diag(Sigma_BE_sparse) <- Var0
+  r_sparse <- PI * (E1 - E0)
+
+  list(r_N = r_N, Sigma_BE_N = Sigma_null, Sigma_APE_N = Sigma_APE_N,
+       r_sparse = r_sparse, Sigma_BE_sparse = Sigma_BE_sparse,
+       Sigma_APE_sparse = Sigma_APE_sparse)
 }
 
 

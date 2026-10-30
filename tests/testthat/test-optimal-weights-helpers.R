@@ -135,9 +135,12 @@ test_that("hermite is vectorized", {
   expect_equal(result, c(0, 1, 2))
 })
 
-test_that("hermite validates order", {
-  expect_error(hermite(0, 0, 0), "between 1 and 8")
-  expect_error(hermite(0, 0, 9), "between 1 and 8")
+test_that("hermite validates order, and accepts any positive order by recurrence", {
+  expect_error(hermite(0, 0, 0), "positive integer")
+  expect_error(hermite(0, 0, 2.5), "positive integer")
+  # He_9 is odd, so He_9(0) = 0; He_10(0) = -945
+  expect_equal(hermite(0, 0, 9), 0)
+  expect_equal(hermite(0, 0, 10), -945)
 })
 
 

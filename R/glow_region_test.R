@@ -144,6 +144,12 @@
 #'   whole-genome-sequencing chromosome. The orchestration layer builds it once
 #'   per chunk. Without it the extraction builds one for this call.
 #' @param verbose Integer (default 0). Verbosity threaded to the underlying calls.
+#' @param debug_errors Logical (default FALSE). When TRUE, the \code{message} of a
+#'   \code{status = "error"} result carries, after the error's own message, the call that
+#'   signaled it and the names of the functions on the stack from this function down to
+#'   the signal (\code{"<message> [call: <call>. stack: f1 > f2 > ... > fk]"}), so that a
+#'   failing region of a scan can be located without rerunning it. The status and every
+#'   result column are the same as with FALSE.
 #'
 #' @return A list with components:
 #' \describe{
@@ -219,9 +225,14 @@ glow_region_test <- function(gds, region, filter_spec,
                              return_evidence = FALSE,
                              region_summary = FALSE,
                              variant_index = NULL,
-                             verbose = 0) {
+                             verbose = 0,
+                             debug_errors = FALSE) {
 
   # ---- Caller-contract validation (fail fast on misuse) ----
+  if (!is.logical(debug_errors) || length(debug_errors) != 1L || is.na(debug_errors)) {
+    stop("`debug_errors` must be TRUE or FALSE (got ", deparse(debug_errors), ").",
+         call. = FALSE)
+  }
   n_b_sources <- sum(!is.null(b_func), !is.null(b_model))
   if (n_b_sources != 1L) {
     stop("Exactly one of `b_func`, `b_model` must be provided (got ",
@@ -259,8 +270,12 @@ glow_region_test <- function(gds, region, filter_spec,
   # The GLOW path (steps 1-4, 6) is wrapped in tryCatch so an unexpected
   # failure becomes status = "error" rather than an uncaught throw (mirrors
   # 02-run-glow-chr.R:416-419). NULL returns from extract/prepare are normal
-  # "skip_empty" outcomes, not errors, and return directly.
+  # "skip_empty" outcomes, not errors, and return directly. With debug_errors, a
+  # calling handler records the stack at the signal (before the unwinding that the
+  # tryCatch handler sees), and the message names the call and the stack.
+  error_stack <- NULL
   tryCatch({
+   withCallingHandlers({
 
     # 1. Extract variants (02-run-glow-chr.R:300-304)
     vset <- extract_variant_set(gds, region, filter_spec,
@@ -282,7 +297,7 @@ glow_region_test <- function(gds, region, filter_spec,
       verbose           = verbose
     )
     if (!is.null(b_func)) prep_args$B_func <- b_func else prep_args$B_model <- b_model
-    input <- do.call(prepare_glow_input, prep_args)
+    input <- do.call("prepare_glow_input", prep_args)   # by name, so a debug stack names it
     if (is.null(input)) return(empty_result("skip_empty"))
 
     # 3. Score statistics. The dispatched stat (what glow_test() combines) honors
@@ -389,13 +404,60 @@ glow_region_test <- function(gds, region, filter_spec,
          staar = staar_pvalues, staar_detail = staar_detail,
          status = status, message = message)
 
+   }, error = function(e) {
+     if (isTRUE(debug_errors)) error_stack <<- sys.calls()
+   })
   }, error = function(e) {
-    empty_result("error", conditionMessage(e))
+    msg <- if (isTRUE(debug_errors)) .debug_error_message(e, error_stack)
+           else conditionMessage(e)
+    empty_result("error", msg)
   })
 }
 
 
 #################### INTERNAL HELPER FUNCTIONS ####################
+
+#' Error message with the failing call and the stack of function names
+#'
+#' Used by \code{glow_region_test()} when \code{debug_errors = TRUE}: the condition's
+#' message first, then the deparsed call that signaled it and the names of the functions
+#' on the stack from the region test's own frame down to the signal (the condition
+#' machinery of \code{tryCatch} and \code{withCallingHandlers} removed), at most
+#' \code{max_names} names.
+#'
+#' @param e The condition caught by the tryCatch.
+#' @param calls The \code{sys.calls()} recorded by the calling handler at the signal, or
+#'   NULL (then the plain message is returned).
+#' @param own Character, the name of the frame to start from.
+#' @param max_names Integer, the most function names kept.
+#' @return A single string.
+#' @keywords internal
+#' @noRd
+.debug_error_message <- function(e, calls, own = "glow_region_test", max_names = 30L) {
+  msg <- conditionMessage(e)
+  if (is.null(calls) || length(calls) == 0L) return(msg)
+  nm <- vapply(calls, function(cl) {
+    f <- cl[[1L]]
+    if (is.symbol(f)) as.character(f)
+    else if (is.call(f) && length(f) == 3L &&
+             (identical(f[[1L]], as.symbol("::")) || identical(f[[1L]], as.symbol(":::"))))
+      paste(deparse(f), collapse = "")
+    else "<anonymous>"
+  }, "")
+  start <- which(nm %in% c(own, paste0("GLOWr::", own), paste0("GLOWr:::", own)))
+  start <- if (length(start)) max(start) else 1L
+  machinery <- c("tryCatch", "tryCatchList", "tryCatchOne", "doTryCatch",
+                 "withCallingHandlers", ".handleSimpleError", "h", "stop", "sys.calls",
+                 "signalCondition", "<anonymous>")
+  end <- length(nm)
+  while (end > start && nm[end] %in% machinery) end <- end - 1L
+  keep <- nm[start:end]
+  keep <- keep[!keep %in% c(machinery[1:5], "do.call")]
+  if (length(keep) > max_names) keep <- c(keep[seq_len(max_names)], "...")
+  call_txt <- paste(deparse(conditionCall(e), width.cutoff = 120L), collapse = " ")
+  if (nchar(call_txt) > 200L) call_txt <- paste0(substr(call_txt, 1L, 200L), "...")
+  sprintf("%s [call: %s. stack: %s]", msg, call_txt, paste(keep, collapse = " > "))
+}
 
 #' NULL-coalescing helper
 #'

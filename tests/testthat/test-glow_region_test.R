@@ -70,7 +70,8 @@ set.seed(20260526)
 # Convenience wrapper with the fixed fixtures bound.
 .call_region <- function(region, staar = NULL, return_evidence = FALSE,
                          b_func = .b_func, b_model = NULL, null_model = .nm,
-                         z_scale = 1, use_spa = NULL, region_summary = FALSE) {
+                         z_scale = 1, use_spa = NULL, region_summary = FALSE,
+                         debug_errors = FALSE) {
   glow_region_test(.gds, region, .spec, null_model,
                    pi_models = .pi_models, pi_features = .feats,
                    reference_medians = .meds,
@@ -78,7 +79,8 @@ set.seed(20260526)
                    ld_threshold = 0.95, mac_threshold = 11L,
                    collapse_method = "mean", use_spa = use_spa, z_scale = z_scale,
                    staar = staar, return_evidence = return_evidence,
-                   region_summary = region_summary, verbose = 0)
+                   region_summary = region_summary,
+                   debug_errors = debug_errors, verbose = 0)
 }
 
 .region_multi  <- list(chr = "22", start = 1000L,   end = 5000L,   label = "GENE_A")
@@ -244,6 +246,34 @@ test_that("a malformed null_model surfaces as status 'error', not a throw", {
   expect_equal(res$status, "error")
   expect_null(res$result)
   expect_true(is.character(res$message) && nzchar(res$message))
+})
+
+# ---- debug_errors: the failing call and the stack in the error message ----
+
+test_that("debug_errors adds the call and the stack to an error row, and nothing else changes", {
+  planted <- function(maf) stop("planted failure")
+  plain <- expect_no_error(.call_region(.region_multi, b_func = planted, b_model = NULL))
+  dbg   <- expect_no_error(.call_region(.region_multi, b_func = planted, b_model = NULL,
+                                        debug_errors = TRUE))
+  expect_equal(plain$status, "error")
+  expect_equal(dbg$status, "error")
+  expect_null(dbg$result)
+  expect_equal(plain$message, "planted failure")
+  expect_true(startsWith(dbg$message, "planted failure [call: "))
+  expect_match(dbg$message, "stack: glow_region_test > ")
+  expect_match(dbg$message, "prepare_glow_input")
+  # a condition without a call prints NULL for the call
+  nocall <- function(maf) stop("no call here", call. = FALSE)
+  res <- .call_region(.region_multi, b_func = nocall, b_model = NULL, debug_errors = TRUE)
+  expect_true(startsWith(res$message, "no call here [call: NULL. stack: glow_region_test"))
+  # a successful region is unchanged by the option
+  base <- .call_region(.region_multi)
+  same <- .call_region(.region_multi, debug_errors = TRUE)
+  expect_equal(same$status, base$status)
+  expect_equal(same$result, base$result)
+  # an invalid value is rejected before any work
+  expect_error(.call_region(.region_multi, debug_errors = NA), "debug_errors")
+  expect_error(.call_region(.region_multi, debug_errors = "yes"), "debug_errors")
 })
 
 

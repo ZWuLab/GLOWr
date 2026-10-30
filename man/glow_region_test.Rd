@@ -23,7 +23,8 @@ glow_region_test(
   return_evidence = FALSE,
   region_summary = FALSE,
   variant_index = NULL,
-  verbose = 0
+  verbose = 0,
+  debug_errors = FALSE
 )
 }
 \arguments{
@@ -117,6 +118,13 @@ whole-genome-sequencing chromosome. The orchestration layer builds it once
 per chunk. Without it the extraction builds one for this call.}
 
 \item{verbose}{Integer (default 0). Verbosity threaded to the underlying calls.}
+
+\item{debug_errors}{Logical (default FALSE). When TRUE, the \code{message} of a
+\code{status = "error"} result carries, after the error's own message, the call that
+signaled it and the names of the functions on the stack from this function down to
+the signal (\code{"<message> [call: <call>. stack: f1 > f2 > ... > fk]"}), so that a
+failing region of a scan can be located without rerunning it. The status and every
+result column are the same as with FALSE.}
 }
 \value{
 A list with components:

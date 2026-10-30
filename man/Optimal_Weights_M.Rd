@@ -68,13 +68,36 @@ The moments of \eqn{g(\tilde{Z}_i)} are computed on the standardized scale. With
 \eqn{U \sim N(0, R)}: \code{get_r_tilde} receives the standard deviations
 \eqn{s_i}, and \code{CovM_gXgY} receives \eqn{R} together with the scales
 \eqn{s_i}, because Mehler's expansion is an expansion in a correlation (bounded by
-one, which the truncation at order 8 relies on) with the Hermite coefficients of
+one, which the truncation at order 64 relies on) with the Hermite coefficients of
 \eqn{g(MMU_i + s_i U)}. GLOWr up to 0.3.2, like the legacy code, passed the
 covariance \eqn{M + MVM} into the expansion and its diagonal, a variance, as the
 standard deviation; the \code{_N} weights of those versions differ from the current ones.
 \item \emph{Sparse Mixture Approximation}: Explicitly models the sparse signal
 structure Z_i = Z_0i + Bstar_i * C_i where C_i ~ Bernoulli(PI_i).
 }
+
+\strong{Numerical integration and the expansion order:}
+
+Every expectation of \eqn{g} is a one-dimensional integral against the standard normal
+density. It is computed by a composite 10-point Gauss-Legendre rule on \eqn{[-12, 12]}
+with panels of width 0.1, cut at the point where the argument of \eqn{g} is zero (the
+kink of the two-sided transforms, which depend on \eqn{|x|}). The Hermite coefficients
+\eqn{b_k = E[g(\mu + sU)\,he_k(U)]} come from one evaluation of \eqn{g} per distinct
+\eqn{(\mu, s)} pair, and Mehler's expansion
+\eqn{\mathrm{Cov}\{g(\mu_i + s_iU_i), g(\mu_j + s_jU_j)\} = \sum_k b_k(i)b_k(j)r_{ij}^k}
+runs to order 64. The truncated sum is the covariance of the projected transform, and its
+diagonal is the truncated variance; the sparse covariance carries the exact mixture
+variance on its diagonal instead, because the mixture formula does not apply to a variant
+with itself. Against a direct integration of every pairwise covariance on a 20-variant
+window with a near-duplicate pair, the weights of the normal approximation agree to
+\eqn{10^{-3}} of the largest weight and the sparse weights to \eqn{5 \times 10^{-3}}
+(the package tests). GLOWr up to 0.3.3 used \code{integrate()} at its default tolerance
+and order 8; on that window its \code{_N} weights were off by \eqn{9 \times 10^{-2}}.
+
+The rule is validated for the Fisher and polynomial transforms over the scales GLOW meets.
+A custom \code{g} must be vectorized, square-integrable against the normal density and
+smooth except possibly at zero; a transform with another kink, a cusp, a discontinuity or
+rapid growth needs its own convergence check.
 
 For each approximation, weights are computed under two hypotheses:
 \itemize{
@@ -91,12 +114,14 @@ The function checks if g is the identity by comparing function bodies:
 
 \itemize{
 \item Burden/Liptak: O(n^3) for matrix inversion
-\item Other tests: O(4 * n^2 * K * n_eval + n^3) where:
+\item Other tests: O(n_pairs * n_nodes * K + 4 * n^2 * K + n^3) where:
 \itemize{
 \item n = number of variants
-\item K = number of Hermite polynomial orders (8)
-\item n_eval = cost per numerical integration
-\item Factor of 4 from normal + sparse approximations, each under H0 and H1
+\item n_pairs = distinct (mean, scale) pairs, at most 2n + 1
+\item n_nodes = quadrature nodes per pair (2,410)
+\item K = number of Hermite polynomial orders (64)
+\item Factor of 4 from the four Mehler sums (the null, the normal-approximation
+alternative, and two sparse components)
 }
 }
 }
@@ -108,7 +133,8 @@ The function checks if g is the identity by comparing function bodies:
 \item M is a valid correlation matrix (positive definite, diagonal = 1)
 \item 0 <= PI_i <= 1 for all i
 \item Bstar values are positive (standardized effect sizes)
-\item For non-Burden tests, g is a smooth function suitable for Hermite expansion
+\item For non-Burden tests, g(mu + s U) is square-integrable under the normal density
+and smooth except possibly at zero (see the details)
 }
 }
 
