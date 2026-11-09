@@ -443,7 +443,8 @@ getZ_marg_score <- function(G, X = NULL, Y = NULL, trait = "binary", null_model 
 #' \itemize{
 #'   \item For common variants: uses standard normal approximation
 #'   \item For rare variants: uses full SPA correction
-#'   \item Cutoff determined by "BE" (Bonferroni-equivalent) threshold
+#'   \item Cutoff determined by SPAtest's "BE" rule, the level-specific cutoff based on
+#'     the Berry-Esseen theorem
 #' }
 #'
 #' \strong{Mathematical Properties:}
@@ -722,7 +723,7 @@ getZ_marg_score_binary_SPA <- function(G, X = NULL, Y = NULL, null_model = NULL)
       cov = X,  # Covariates (NULL if none, intercept added internally by SPAtest)
       method = "fastSPA", # Use fast SPA with partially normal approximation
       minmac = 0,         # Include all variants regardless of MAC
-      Cutoff = "BE"       # Bonferroni-equivalent cutoff for SPA application
+      Cutoff = "BE"       # Berry-Esseen level-specific cutoff for SPA application
     )$p.value
   }
   if (!all(ok_var)) {

@@ -87,3 +87,21 @@ test_that("input validation", {
                pvalue_col = "nope"), "no 'nope' column")
   expect_error(estimate_inflation_factor(list(), "lambda_gc"), "data.frame")
 })
+
+
+test_that("the MHC exclusion ignores a 'chr' prefix on the labels", {
+  # 60 chromosome-6 variants moved into the MHC; the same scan with "chr6" labels must lose
+  d <- .make_scan()
+  idx <- which(d$scan$chr == "6")[1:60]
+  d$scan$pos[idx] <- d$ld_scores$pos[idx] <- as.integer(seq(25.1e6, 34.9e6, length.out = 60))
+  bare <- estimate_inflation_factor(d$scan, "ldsc_intercept", ld_scores = d$ld_scores)
+  pre  <- d
+  pre$scan$chr      <- paste0("chr", pre$scan$chr)
+  pre$ld_scores$chr <- paste0("chr", pre$ld_scores$chr)
+  prefixed <- estimate_inflation_factor(pre$scan, "ldsc_intercept", ld_scores = pre$ld_scores)
+  expect_equal(prefixed$n_variants, bare$n_variants)
+  expect_equal(prefixed$factor, bare$factor)
+  none <- estimate_inflation_factor(d$scan, "ldsc_intercept", ld_scores = d$ld_scores,
+                                    exclude_mhc = FALSE)
+  expect_gt(none$n_variants, bare$n_variants)
+})

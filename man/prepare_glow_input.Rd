@@ -13,11 +13,11 @@ prepare_glow_input(
   PI_models = NULL,
   PI_features = NULL,
   reference_medians = NULL,
-  ld_threshold = 0.9,
+  ld_threshold = glow_preprocessing_defaults()$ld_threshold,
   ld_prefer_keep = "lower_maf",
   remove_lindep = TRUE,
-  mac_threshold = 10L,
-  collapse_method = "mean",
+  mac_threshold = glow_preprocessing_defaults()$mac_threshold,
+  collapse_method = glow_preprocessing_defaults()$collapse_method,
   max_group_size = Inf,
   verbose = 1
 )
@@ -53,8 +53,8 @@ medians for NA imputation (optional). From
 \code{\link{compute_annotation_medians}}. When provided, NA annotation
 values are imputed with these medians instead of per-gene column medians.}
 
-\item{ld_threshold}{Numeric (default 0.9). Correlation threshold for LD
-pruning.}
+\item{ld_threshold}{Numeric. Absolute-correlation threshold for LD pruning
+(default \code{glow_preprocessing_defaults()$ld_threshold}, 0.9).}
 
 \item{ld_prefer_keep}{Character (default "lower_maf"). Tie-breaking for LD
 pruning: "lower_maf", "higher_maf", or "first".}
@@ -62,11 +62,13 @@ pruning: "lower_maf", "higher_maf", or "first".}
 \item{remove_lindep}{Logical (default TRUE). Remove linearly dependent
 columns via QR decomposition.}
 
-\item{mac_threshold}{Integer (default 10). MAC threshold for rare variant
-collapsing. Set to 0 to disable collapsing.}
+\item{mac_threshold}{Integer. MAC threshold for rare variant collapsing: variants
+with MAC strictly below it are collapsed (default
+\code{glow_preprocessing_defaults()$mac_threshold}, 10). Set to 0 to disable collapsing.}
 
-\item{collapse_method}{Character (default "mean"). B/PI aggregation method
-for collapsed groups: "mean", "max", or "sum".}
+\item{collapse_method}{Character. B/PI aggregation method for collapsed groups:
+"mean", "max", or "sum" (default \code{glow_preprocessing_defaults()$collapse_method},
+"mean").}
 
 \item{max_group_size}{Numeric (default Inf). Maximum variants per collapsed
 group.}

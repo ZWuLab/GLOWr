@@ -97,11 +97,12 @@
 #'   exclusive with \code{b_model}.
 #' @param b_model A \code{glow_B_model} (from \code{\link{train_B_model}} /
 #'   \code{\link{load_B_model}}). Mutually exclusive with \code{b_func}.
-#' @param ld_threshold Numeric (default 0.9). LD-pruning correlation threshold.
-#' @param mac_threshold Integer (default 10). MAC threshold for rare-variant
-#'   collapsing.
-#' @param collapse_method Character (default "mean"). B/PI aggregation method
-#'   for collapsed groups.
+#' @param ld_threshold Numeric. LD-pruning threshold on the absolute correlation
+#'   (default \code{glow_preprocessing_defaults()$ld_threshold}, 0.9).
+#' @param mac_threshold Integer. MAC threshold for rare-variant collapsing, variants with
+#'   MAC strictly below it (default \code{glow_preprocessing_defaults()$mac_threshold}, 10).
+#' @param collapse_method Character. B/PI aggregation method for collapsed groups
+#'   (default \code{glow_preprocessing_defaults()$collapse_method}, "mean").
 #' @param use_spa Logical or NULL (default NULL). Selects GLOW's single-variant
 #'   score statistics: NULL auto-detects (SPA for binary, standard for
 #'   continuous); TRUE forces SPA (binary only — a non-binary trait errors);
@@ -193,7 +194,7 @@
 #'   gds, region, spec, null_model,
 #'   pi_models = pi, pi_features = feats, reference_medians = meds,
 #'   b_func = function(maf) sqrt(-0.14307 * log(maf * (1 - maf)) - 0.19522),
-#'   ld_threshold = 0.95, mac_threshold = 11L)
+#'   ld_threshold = 0.9, mac_threshold = 10L)
 #' res$status
 #' res$result
 #' }
@@ -217,8 +218,9 @@ glow_region_test <- function(gds, region, filter_spec,
                              null_model,
                              pi_models, pi_features, reference_medians,
                              b_func = NULL, b_model = NULL,
-                             ld_threshold = 0.9, mac_threshold = 10L,
-                             collapse_method = "mean",
+                             ld_threshold = glow_preprocessing_defaults()$ld_threshold,
+                             mac_threshold = glow_preprocessing_defaults()$mac_threshold,
+                             collapse_method = glow_preprocessing_defaults()$collapse_method,
                              use_spa = NULL,
                              z_scale = 1,
                              staar = NULL,

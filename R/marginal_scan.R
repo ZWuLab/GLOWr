@@ -741,6 +741,9 @@ annotate_gds_marginal <- function(gds_path, results,
   # Verify first column of X is the intercept before dropping it
   stopifnot(all(null_model$X[, 1] == 1))
   X_no_intercept <- null_model$X[, -1, drop = FALSE]
+  # SPAtest documents cov = NULL for a model without covariates; a zero-column matrix
+  # fails inside it ("subscript out of bounds").
+  if (ncol(X_no_intercept) == 0L) X_no_intercept <- NULL
 
   spa_result <- SPAtest::ScoreTest_SPA(
     genos = t(G),

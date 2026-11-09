@@ -54,7 +54,8 @@
 #'   common-variant QC (default \code{"MAF"}, \code{0.01}). QC is skipped if
 #'   \code{maf_col} is absent or \code{maf_min <= 0}.
 #' @param exclude_mhc,mhc_chr,mhc_start,mhc_end Exclude the MHC region (default
-#'   TRUE; chr \code{"6"}, \code{25e6}-\code{35e6}, hg38).
+#'   TRUE; chr \code{"6"}, \code{25e6}-\code{35e6}, hg38). A \code{"chr"} prefix on the
+#'   scan's labels or on \code{mhc_chr} is ignored in the comparison.
 #' @param winsorize \eqn{\chi^2} cap passed to \code{\link{ldsc_regression}}
 #'   (default 80).
 #'
@@ -131,7 +132,9 @@ estimate_inflation_factor <- function(scan,
   }
 
   if (isTRUE(exclude_mhc)) {
-    in_mhc <- as.character(scan$chr) == as.character(mhc_chr) &
+    # Labels compared without a "chr" prefix, so a GDS labeled "chr6" is excluded as "6" is
+    strip_chr <- function(x) sub("^[Cc][Hh][Rr]", "", as.character(x))
+    in_mhc <- strip_chr(scan$chr) == strip_chr(mhc_chr) &
               scan$pos >= mhc_start & scan$pos <= mhc_end
     scan <- scan[!in_mhc, , drop = FALSE]
   }

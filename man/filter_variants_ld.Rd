@@ -6,7 +6,7 @@
 \usage{
 filter_variants_ld(
   G,
-  ld_threshold = 0.9,
+  ld_threshold = glow_preprocessing_defaults()$ld_threshold,
   remove_lindep = TRUE,
   prefer_keep = "lower_maf"
 )
@@ -15,7 +15,9 @@ filter_variants_ld(
 \item{G}{Numeric matrix (n x p) of genotype dosage.}
 
 \item{ld_threshold}{Numeric correlation threshold. Pairs with
-|r| > ld_threshold are considered redundant. Default 0.9.}
+|r| > ld_threshold are considered redundant (the threshold is on the absolute
+correlation, not on r squared). Default
+\code{glow_preprocessing_defaults()$ld_threshold}, 0.9.}
 
 \item{remove_lindep}{Logical. If TRUE (default), also remove columns
 that are exact linear combinations of other columns after LD pruning.

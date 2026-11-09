@@ -68,7 +68,9 @@ flip_alleles <- function(G) {
 #'
 #' @param G Numeric matrix (n x p) of genotype dosage.
 #' @param ld_threshold Numeric correlation threshold. Pairs with
-#'   |r| > ld_threshold are considered redundant. Default 0.9.
+#'   |r| > ld_threshold are considered redundant (the threshold is on the absolute
+#'   correlation, not on r squared). Default
+#'   \code{glow_preprocessing_defaults()$ld_threshold}, 0.9.
 #' @param remove_lindep Logical. If TRUE (default), also remove columns
 #'   that are exact linear combinations of other columns after LD pruning.
 #'   The columns are visited in order and a column is dropped when its
@@ -122,8 +124,9 @@ flip_alleles <- function(G) {
 #' G_pruned <- G[, keep, drop = FALSE]
 #'
 #' @export
-filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
-                                prefer_keep = "lower_maf") {
+filter_variants_ld <- function(G, ld_threshold = glow_preprocessing_defaults()$ld_threshold,
+                               remove_lindep = TRUE,
+                               prefer_keep = "lower_maf") {
   stopifnot(is.matrix(G), is.numeric(G))
   stopifnot(ld_threshold > 0 && ld_threshold <= 1)
   prefer_keep <- match.arg(prefer_keep, c("lower_maf", "higher_maf", "first"))
@@ -212,13 +215,14 @@ filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
 #'
 #' @param G Numeric matrix (n x p) of genotype dosage.
 #' @param mac_threshold Integer MAC threshold. Variants with MAC < this
-#'   are candidates for collapsing. Default 10.
+#'   are candidates for collapsing. Default
+#'   \code{glow_preprocessing_defaults()$mac_threshold}, 10.
 #' @param max_group_size Integer maximum variants per collapsed group.
 #'   Inf means all rare variants collapse into one. Default Inf.
 #' @param spatial_grouping Logical. If TRUE, groups rare variants only
 #'   between pairs of adjacent common variants (respects genomic order).
 #'   If FALSE, groups all rare variants sequentially. Default FALSE.
-#' @param agg_method Character method for aggregating B/PI values of
+#' @param agg_method Character method for aggregating the B/PI values of
 #'   collapsed variants. One of "mean", "max", "sum". Default "mean".
 #'
 #' @return A list with components:
@@ -249,10 +253,10 @@ filter_variants_ld <- function(G, ld_threshold = 0.9, remove_lindep = TRUE,
 #'
 #' @export
 collapse_rare_variants <- function(G,
-                                    mac_threshold = 10L,
+                                    mac_threshold = glow_preprocessing_defaults()$mac_threshold,
                                     max_group_size = Inf,
                                     spatial_grouping = FALSE,
-                                    agg_method = "mean") {
+                                    agg_method = glow_preprocessing_defaults()$collapse_method) {
   stopifnot(is.matrix(G), is.numeric(G))
   stopifnot(agg_method %in% c("mean", "max", "sum"))
 

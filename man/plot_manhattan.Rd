@@ -16,6 +16,8 @@ plot_manhattan(
   highlight_color = "red",
   title = "Manhattan Plot",
   cex = 0.5,
+  thin = TRUE,
+  thin_cells_per_inch = NULL,
   ...
 )
 }
@@ -47,6 +49,20 @@ colors. Default: c("grey30", "grey60").}
 \item{title}{Character plot title. Default: "Manhattan Plot".}
 
 \item{cex}{Numeric point size. Default: 0.5.}
+
+\item{thin}{Logical (default TRUE). Draw at most one point per cell of a grid at the
+marker's scale (see \code{thin_cells_per_inch}), which bounds the drawn points at a
+few tens of thousands however many variants there are, so a whole-genome PDF stays
+small. Every highlighted variant is drawn, and the point kept in a cell is its highest,
+so the extremes are always visible. The axes and colors come from the complete input,
+and a point outside a cropped axis range is kept and clipped as usual. At the marker's
+size the drawing matches the full set; a vector PDF enlarged well beyond that scale
+shows the thinning (\code{thin = FALSE} draws every point).}
+
+\item{thin_cells_per_inch}{Numeric or NULL (default). The thinning grid's cells per inch
+of the plot region. NULL sets the cell to half the marker's drawn diameter
+(\code{pch = 20} at the given \code{cex}: about 0.035 inch at \code{cex = 0.5},
+measured at 1200 dpi), so two points in one cell overlap by most of their area.}
 
 \item{...}{Additional arguments passed to \code{plot()}.}
 }

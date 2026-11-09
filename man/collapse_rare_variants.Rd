@@ -6,17 +6,18 @@
 \usage{
 collapse_rare_variants(
   G,
-  mac_threshold = 10L,
+  mac_threshold = glow_preprocessing_defaults()$mac_threshold,
   max_group_size = Inf,
   spatial_grouping = FALSE,
-  agg_method = "mean"
+  agg_method = glow_preprocessing_defaults()$collapse_method
 )
 }
 \arguments{
 \item{G}{Numeric matrix (n x p) of genotype dosage.}
 
 \item{mac_threshold}{Integer MAC threshold. Variants with MAC < this
-are candidates for collapsing. Default 10.}
+are candidates for collapsing. Default
+\code{glow_preprocessing_defaults()$mac_threshold}, 10.}
 
 \item{max_group_size}{Integer maximum variants per collapsed group.
 Inf means all rare variants collapse into one. Default Inf.}
@@ -25,7 +26,7 @@ Inf means all rare variants collapse into one. Default Inf.}
 between pairs of adjacent common variants (respects genomic order).
 If FALSE, groups all rare variants sequentially. Default FALSE.}
 
-\item{agg_method}{Character method for aggregating B/PI values of
+\item{agg_method}{Character method for aggregating the B/PI values of
 collapsed variants. One of "mean", "max", "sum". Default "mean".}
 }
 \value{

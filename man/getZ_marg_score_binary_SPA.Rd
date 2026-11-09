@@ -118,7 +118,8 @@ evaluated at the saddlepoint. The "fastSPA" method uses a hybrid approach:
 \itemize{
 \item For common variants: uses standard normal approximation
 \item For rare variants: uses full SPA correction
-\item Cutoff determined by "BE" (Bonferroni-equivalent) threshold
+\item Cutoff determined by SPAtest's "BE" rule, the level-specific cutoff based on
+the Berry-Esseen theorem
 }
 
 \strong{Mathematical Properties:}

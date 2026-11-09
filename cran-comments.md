@@ -1,4 +1,4 @@
-# cran-comments for GLOWr 0.3.4
+# cran-comments for GLOWr 0.3.5
 
 ## Test environment
 - R 4.3.3 on x86_64-conda-linux-gnu

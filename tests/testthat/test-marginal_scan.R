@@ -452,3 +452,29 @@ test_that("marginal_scan with n_cores = 2 returns the same table as with 1", {
   expect_equal(r1, r2)
   expect_error(marginal_scan(test_gds_path, nm, n_cores = 0L), "n_cores")
 })
+
+test_that("marginal_scan runs SPA with an intercept-only null model and with one covariate", {
+  # On the bundled synthetic aGDS, so that the public check runs it too (the cohort fixture
+  # above is machine-local). SPAtest takes cov = NULL when no covariate remains (GLOWr 0.3.5),
+  # and a single remaining covariate must stay a one-column matrix.
+  skip_if_not_installed("SeqArray")
+  agds <- tempfile(fileext = ".gds")
+  create_test_agds(agds)
+  withr::defer(unlink(agds))
+  g <- SeqArray::seqOpen(agds, readonly = TRUE)
+  ids <- SeqArray::seqGetData(g, "sample.id")
+  SeqArray::seqClose(g)
+  set.seed(7)
+  Y  <- rbinom(length(ids), 1L, 0.4)
+  x1 <- rnorm(length(ids))
+  nm0 <- fit_null_model(matrix(1, length(ids), 1L, dimnames = list(NULL, "(Intercept)")),
+                        Y, trait = "binary", sample_id = ids)
+  r0 <- suppressWarnings(marginal_scan(agds, nm0, use_SPA = TRUE, verbose = 0))
+  expect_true(all(c("Z_SPA", "pvalue_SPA") %in% names(r0)))
+  expect_true(all(r0$pvalue_SPA >= 0 & r0$pvalue_SPA <= 1, na.rm = TRUE))
+  nm1 <- fit_null_model(cbind("(Intercept)" = 1, x1 = x1), Y, trait = "binary", sample_id = ids)
+  r1 <- suppressWarnings(marginal_scan(agds, nm1, use_SPA = TRUE, verbose = 0))
+  expect_true(all(r1$pvalue_SPA >= 0 & r1$pvalue_SPA <= 1, na.rm = TRUE))
+  s1 <- suppressWarnings(marginal_scan(agds, nm1, use_SPA = FALSE, verbose = 0))
+  expect_equal(r1$pvalue, s1$pvalue)       # the standard columns do not depend on use_SPA
+})

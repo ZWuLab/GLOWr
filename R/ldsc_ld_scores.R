@@ -34,8 +34,15 @@
 #' \eqn{[\mathrm{segment} \pm \mathrm{window}]} are read, mean-imputed,
 #' column-standardised, and a single BLAS cross-product gives the
 #' window-by-core correlation block, from which each core variant's LD score is
-#' a \eqn{\pm}\code{window} prefix-sum over \eqn{\tilde r^2}. Peak memory is
-#' bounded by one segment plus its flanks, never a whole chromosome.
+#' a \eqn{\pm}\code{window} prefix-sum over \eqn{\tilde r^2}, the window inclusive
+#' at both ends. The file's storage order need not be position order: the genotype
+#' columns are put in position order after they are read. Peak memory is bounded by one
+#' segment plus its flanks, never a whole chromosome: per worker, the standardized
+#' genotypes of the segment and its two flanks (8 bytes per sample per variant) plus
+#' three matrices of the flanked window by the segment. With \code{n_cores > 1} the
+#' segments are split into contiguous blocks and each block runs in a forked worker on
+#' its own GDS handle, each holding its own matrices; a segment always reads its full
+#' flank, so the result does not depend on \code{n_cores}.
 #'
 #' \strong{Single-chromosome contract.} Positions repeat across chromosomes, so
 #' the \eqn{\pm}\code{window} mask is only meaningful within one chromosome;
@@ -68,6 +75,11 @@
 #' @param seed Integer seed for the \code{sample_n} subsample (default
 #'   \code{1L}); unused when \code{sample_n = 0L}.
 #' @param verbose Integer verbosity (0 = silent, 1 = a one-line summary).
+#' @param n_cores Integer (default \code{1L}). Forked workers over which the core segments
+#'   are spread (\code{parallel::mclapply}). Each worker opens its own read-only handle on
+#'   \code{gds_file} and computes whole segments with their flanking windows, so the table
+#'   is the one the serial loop writes. Not available on Windows (no fork): a value above 1
+#'   warns and runs with one worker.
 #'
 #' @return A \code{data.frame} with one row per biallelic SNV:
 #'   \code{chr}, \code{pos}, \code{ref}, \code{alt}, \code{variant_id}, and
@@ -89,7 +101,7 @@
 #' @export
 compute_ld_scores <- function(gds_file, variant_id = NULL, window = 1e6,
                               segment = 2000L, sample_n = 0L, seed = 1L,
-                              verbose = 1) {
+                              verbose = 1, n_cores = 1L) {
   if (!requireNamespace("SeqArray", quietly = TRUE)) {
     stop("SeqArray is required for compute_ld_scores(). Install with: ",
          "BiocManager::install('SeqArray')", call. = FALSE)
@@ -152,30 +164,92 @@ compute_ld_scores <- function(gds_file, variant_id = NULL, window = 1e6,
                       ld = numeric(0), stringsAsFactors = FALSE))
   }
 
-  seg_starts <- seq(1L, m, by = SEG)
-  for (s in seg_starts) {
+  # The reference-sample ids after the optional subsample, so that a worker applies the
+  # same filter on its own handle.
+  sid_keep <- if (sample_n > 0L) SeqArray::seqGetData(gds, "sample.id") else NULL
+
+  # One core segment [s, e] on the handle `g`: read [pos[s] - WIN, pos[e] + WIN], inclusive
+  # at both ends (left.open = TRUE makes the lower bound inclusive for integer and
+  # fractional windows alike; the per-target bound below uses the same rule, so a target's
+  # score does not depend on where its segment starts), mean-impute, standardize, one BLAS
+  # cross-product against the core columns, and sum the adjusted r^2 over each core
+  # variant's own window by prefix sums.
+  ld_segment <- function(g, s) {
     e   <- min(s + SEG - 1L, m)
-    lo  <- findInterval(pos[s] - WIN, pos) + 1L; if (lo < 1L) lo <- 1L
-    hi  <- findInterval(pos[e] + WIN, pos)
+    lo  <- findInterval(pos[s] - WIN, pos, left.open = TRUE) + 1L   # first pos >= pos[s]-WIN
+    hi  <- findInterval(pos[e] + WIN, pos)                           # last  pos <= pos[e]+WIN
     idx <- lo:hi
-    SeqArray::seqSetFilter(gds, variant.id = vid[idx], verbose = FALSE)
-    D  <- SeqArray::seqGetData(gds, "$dosage")   # n_samp x length(idx); ref/alt
-                                                 # immaterial (r^2 is invariant)
+    SeqArray::seqSetFilter(g, variant.id = vid[idx], verbose = FALSE)
+    D  <- SeqArray::seqGetData(g, "$dosage")     # n_samp x |idx|, in the file's STORAGE
+                                                 # order; ref/alt immaterial (r^2 is invariant)
+    # The filter selects variants, it does not order them: the columns come in storage
+    # order, which is position order only for a position-sorted file. Put them in the
+    # order of vid[idx] (position order), which the core columns and the window bounds
+    read_ids <- SeqArray::seqGetData(g, "variant.id")
+    if (!identical(read_ids, vid[idx])) D <- D[, match(vid[idx], read_ids), drop = FALSE]
+    storage.mode(D) <- "double"                  # once; the steps below then work in place
     cm <- colMeans(D, na.rm = TRUE)
-    nas <- which(is.na(D), arr.ind = TRUE)       # impute NA -> col mean
-    if (nrow(nas)) D[nas] <- cm[nas[, 2L]]
+    if (anyNA(D)) {                              # impute NA -> col mean
+      nas <- which(is.na(D), arr.ind = TRUE)
+      D[nas] <- cm[nas[, 2L]]
+    }
     csd <- sqrt((colSums(D * D) - n_samp * cm * cm) / (n_samp - 1))
     csd[!is.finite(csd) | csd == 0] <- 1
-    Ds <- sweep(sweep(D, 2L, cm, "-"), 2L, csd, "/")
+    # Standardize column by column, in place. sweep() would hold two more n_samp x |idx|
+    # copies, and a worker's memory is this matrix times the number of copies (8 bytes per
+    # entry: 7,743 samples by 20,000 variants is 1.2 GB per copy).
+    for (j in seq_along(idx)) D[, j] <- (D[, j] - cm[j]) / csd[j]
     core_cols <- (s - lo + 1L):(e - lo + 1L)     # cores within the read window
-    R     <- crossprod(Ds, Ds[, core_cols, drop = FALSE]) / (n_samp - 1)
-    R2adj <- R * R - (1 - R * R) / (n_samp - 2)
-    cs    <- rbind(0, apply(R2adj, 2L, cumsum))   # (|idx|+1) x |core| prefix sums
+    R  <- crossprod(D, D[, core_cols, drop = FALSE]) / (n_samp - 1)   # |idx| x |core|
+    R  <- R * R - (1 - R * R) / (n_samp - 2)     # the LDSC-adjusted r^2, in place
+    cs <- apply(R, 2L, cumsum)                   # |idx| x |core| prefix sums
+    if (!is.matrix(cs)) cs <- matrix(cs, nrow = nrow(R))   # apply() drops a 1-row result
     wpos  <- pos[idx]; cpos <- pos[s:e]
-    a <- findInterval(cpos - WIN - 1, wpos) + 1L  # first window row >= cpos-WIN
-    b <- findInterval(cpos + WIN,     wpos)        # last  window row <= cpos+WIN
+    a <- findInterval(cpos - WIN, wpos, left.open = TRUE) + 1L  # first window row >= cpos-WIN
+    b <- findInterval(cpos + WIN, wpos)                          # last  window row <= cpos+WIN
     q <- seq_along(core_cols)
-    ld[s:e] <- cs[cbind(b + 1L, q)] - cs[cbind(a, q)]
+    # the sum over window rows a..b of column q is cs[b, q] - cs[a - 1, q], with cs[0, q] = 0
+    cs[cbind(b, q)] - ifelse(a > 1L, cs[cbind(pmax(a - 1L, 1L), q)], 0)
+  }
+
+  seg_starts <- seq(1L, m, by = SEG)
+  n_cores <- as.integer(n_cores)
+  stopifnot(length(n_cores) == 1L, !is.na(n_cores), n_cores >= 1L)
+  if (n_cores > 1L && .Platform$OS.type == "windows") {
+    warning("n_cores > 1 needs fork(), which Windows lacks; running with one worker.")
+    n_cores <- 1L
+  }
+  n_workers <- min(n_cores, length(seg_starts))
+  if (n_workers == 1L) {
+    for (s in seg_starts) {
+      e <- min(s + SEG - 1L, m)
+      ld[s:e] <- ld_segment(gds, s)
+    }
+  } else {
+    # Contiguous blocks of whole segments, one forked worker each, every worker on its own
+    # read-only handle (a forked copy of the parent's handle must not be used). A segment
+    # always reads its full flank, so the values do not depend on the split.
+    blocks <- split(seg_starts, cut(seq_along(seg_starts), n_workers, labels = FALSE))
+    run_block <- function(starts) {
+      g <- SeqArray::seqOpen(gds_file, readonly = TRUE, allow.duplicate = TRUE)
+      on.exit(SeqArray::seqClose(g), add = TRUE)
+      if (!is.null(sid_keep)) {
+        SeqArray::seqSetFilter(g, sample.id = sid_keep, verbose = FALSE)
+      }
+      lapply(starts, function(s) ld_segment(g, s))
+    }
+    parts <- parallel::mclapply(blocks, run_block, mc.cores = n_workers)
+    for (k in seq_along(blocks)) {
+      starts <- blocks[[k]]
+      if (inherits(parts[[k]], "try-error") || length(parts[[k]]) != length(starts)) {
+        stop("compute_ld_scores(): a forked worker failed: ",
+             paste(as.character(parts[[k]]), collapse = " "), call. = FALSE)
+      }
+      for (j in seq_along(starts)) {
+        s <- starts[j]; e <- min(s + SEG - 1L, m)
+        ld[s:e] <- parts[[k]][[j]]
+      }
+    }
   }
 
   if (verbose >= 1) {

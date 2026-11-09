@@ -358,3 +358,80 @@ test_that("integration: marginal_scan results can be plotted", {
   lambda2 <- plot(results, type = "both")
   expect_true(is.numeric(lambda2))
 })
+
+# ==============================================================================
+# Phase 5: display-grid thinning
+# ==============================================================================
+
+test_that(".thin_points keeps every point when sparse and the highest point per cell when dense", {
+  .open_null_dev()
+  on.exit(.close_null_dev(), add = TRUE)
+  plot(c(0, 1), c(0, 1), type = "n")
+  # sparse: distinct cells, everything kept
+  x <- seq(0.05, 0.95, length.out = 10); y <- seq(0.05, 0.95, length.out = 10)
+  expect_true(all(.thin_points(x, y, cells_per_inch = 20)))
+  # dense: 10,000 points within one cell, one kept, and it is the highest
+  set.seed(3)
+  x <- 0.5 + runif(1e4) * 1e-6; y <- 0.5 + runif(1e4) * 1e-6
+  keep <- .thin_points(x, y, cells_per_inch = 20)
+  expect_equal(sum(keep), 1L)
+  expect_equal(y[keep], max(y))
+})
+
+test_that(".thin_points keeps a visible point under a cropped axis and maps a log axis", {
+  .open_null_dev()
+  on.exit(.close_null_dev(), add = TRUE)
+  # cropped y axis: the point at 20 lies outside the frame and must not take the cell of the
+  # visible point at 4.99 (both are kept; the device clips the outside one as usual)
+  plot(c(0.9, 1.1), c(0, 5), type = "n", yaxs = "i")
+  expect_identical(.thin_points(c(1, 1), c(4.99, 20), cells_per_inch = 20), c(TRUE, TRUE))
+  # dense inside points still thin to one, the highest; the outside point stays
+  set.seed(5)
+  x <- 1 + runif(500) * 1e-6; y <- 2 + runif(500) * 1e-6
+  keep <- .thin_points(c(x, 1), c(y, 20), cells_per_inch = 20)
+  expect_equal(sum(keep[1:500]), 1L)
+  expect_equal(y[keep[1:500]], max(y))
+  expect_true(keep[501])
+  # log x axis: four points a decade apart are four cells, not two
+  plot(c(1, 1000), c(0, 1), type = "n", log = "x")
+  expect_identical(.thin_points(c(1, 10, 100, 1000), rep(0.5, 4), cells_per_inch = 20),
+                   rep(TRUE, 4))
+  # through plot_manhattan with a cropped ylim
+  d <- data.frame(chr = "1", pos = c(1, 1), pvalue = 10^-c(4.99, 20), stringsAsFactors = FALSE)
+  expect_silent(plot_manhattan(d, ylim = c(0, 5), yaxs = "i"))
+})
+
+test_that(".thin_cells follows the marker size and accepts an explicit resolution", {
+  expect_equal(.thin_cells(NULL, cex = 0.5), 2 / 0.035)
+  expect_equal(.thin_cells(100, cex = 0.5), 100)
+  expect_error(.thin_cells(-1, cex = 0.5))
+})
+
+test_that(".qq_band_ranks is dense at the top, geometric beyond, and bounded", {
+  expect_identical(.qq_band_ranks(10L), 1:10)
+  r <- .qq_band_ranks(1e6L)
+  expect_identical(r[1:200], 1:200)
+  expect_equal(r[length(r)], 1e6L)
+  expect_true(all(diff(r) > 0))
+  expect_lt(length(r), 2300L)
+})
+
+test_that("thinning leaves lambda unchanged and bounds the drawn points and the file size", {
+  set.seed(7)
+  n <- 300000L
+  d <- data.frame(chr = sample(1:22, n, replace = TRUE),
+                  pos = sample.int(2e8, n, replace = TRUE),
+                  pvalue = runif(n), variant_id = seq_len(n))
+  d$pvalue[1:20] <- 10^-runif(20, 6, 20)
+  f1 <- tempfile(fileext = ".pdf"); f2 <- tempfile(fileext = ".pdf")
+  on.exit(unlink(c(f1, f2)), add = TRUE)
+  grDevices::pdf(f1, width = 14, height = 6)
+  plot_manhattan(d, highlight = 1:20); lam1 <- plot_qq(d)
+  grDevices::dev.off()
+  grDevices::pdf(f2, width = 14, height = 6)
+  plot_manhattan(d, thin = FALSE, highlight = 1:20); lam2 <- plot_qq(d, thin = FALSE)
+  grDevices::dev.off()
+  expect_equal(lam1, lam2)
+  expect_lt(file.size(f1), file.size(f2) / 3)
+  expect_lt(file.size(f1), 3e6)
+})

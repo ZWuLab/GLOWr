@@ -41,7 +41,8 @@ common-variant QC (default \code{"MAF"}, \code{0.01}). QC is skipped if
 \code{maf_col} is absent or \code{maf_min <= 0}.}
 
 \item{exclude_mhc, mhc_chr, mhc_start, mhc_end}{Exclude the MHC region (default
-TRUE; chr \code{"6"}, \code{25e6}-\code{35e6}, hg38).}
+TRUE; chr \code{"6"}, \code{25e6}-\code{35e6}, hg38). A \code{"chr"} prefix on the
+scan's labels or on \code{mhc_chr} is ignored in the comparison.}
 
 \item{winsorize}{\eqn{\chi^2} cap passed to \code{\link{ldsc_regression}}
 (default 80).}

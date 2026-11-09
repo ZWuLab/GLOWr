@@ -1,3 +1,59 @@
+# GLOWr 0.3.5
+
+- **The single-variant Manhattan and QQ plots draw at most one point per grid cell.**
+  `plot_manhattan()` and `plot_qq()` drew one vector point per variant, so the PDF of a
+  two-chromosome WGS scan was 814 MB and a whole genome would have been several gigabytes
+  (reported by Alberto Brusati, Landers lab, UMass Chan Medical School). With `thin = TRUE`
+  (the default) the points are mapped to a grid over the plot region whose cell is half the
+  marker's drawn diameter (`thin_cells_per_inch`, about 57 cells per inch at `cex = 0.5`), and
+  one point per cell is drawn, the highest, with every highlighted variant kept. Two points in
+  one cell overlap at the marker's size, so at that scale the picture is the full set's (a
+  vector PDF enlarged well beyond it shows the thinning), with tens of thousands of points
+  however many variants there are. A point outside a cropped axis range is kept and clipped
+  as usual, and a logarithmic axis is mapped as the frame is, so neither hides a visible
+  point. The QQ band is
+  evaluated at every rank among the 200 smallest p-values and at about 2,000 geometrically
+  spaced ranks beyond, with the original `n` in the Beta quantiles, instead of at all `2n`
+  vertices. The lambda, the expected quantiles, the axes and the colors come from the complete
+  input. `thin = FALSE` restores the previous drawing.
+- **`compute_ld_scores()` no longer depends on the segment size, and runs on `n_cores`.** The
+  lower bound of a segment's read window, `findInterval(pos[s] - window, pos) + 1L`, excluded a
+  neighbor exactly `window` bp below the segment's first variant, while the per-target window
+  included it, so a variant that opened a segment could lose one neighbor it kept inside a
+  segment (on the example GDS, an LD score of 1.000 or 1.280 for the same variant depending
+  on `segment`). Both bounds now use `findInterval(..., left.open = TRUE) + 1L`, the inclusive
+  form for integer and fractional windows alike, and a test compares the function with a
+  direct computation at windows that hit a boundary exactly. At the default 1 Mb window the
+  affected neighbors are those exactly 1,000,000 bp from a segment's first variant, so
+  existing LD tables change little, but a table computed with this version is the one to
+  use. With `n_cores > 1` the segments are split into contiguous blocks that run in forked
+  workers, each on its own GDS handle. The table is identical to the serial one. Each worker
+  converts its genotypes to double once and standardizes them in place, so it holds one copy
+  of the segment-and-flanks matrix (8 bytes per sample per variant) instead of three.
+- **`compute_ld_scores()` no longer assumes that the file's storage order is position order.**
+  `seqSetFilter()` selects variants without ordering them, so on a GDS whose variants are not
+  stored by position (a VCF converted in another order, a merged file) the dosage columns came
+  back in storage order while the core columns and the window bounds were in position order,
+  and the scores addressed the wrong genotypes (on a three-variant file, 0.285 where the direct
+  computation gives 1.103). The columns are now put in position order after the read; a test
+  on a file written out of order compares the function with the direct computation.
+- **`estimate_inflation_factor()` excludes the MHC whatever the chromosome labels' form.** The
+  exclusion compared the scan's labels with `"6"` literally, so a scan of a GDS labeled
+  `chr6` kept the MHC variants in the regression. The comparison ignores a `chr` prefix.
+- **`glow_preprocessing_defaults()`** returns the LD-pruning threshold, the MAC collapsing
+  threshold and the B/PI aggregation method that `prepare_glow_input()`, `glow_region_test()`,
+  `filter_variants_ld()` and `collapse_rare_variants()` use when the caller does not set them
+  (0.9 on the absolute correlation, 10, "mean", the methods paper's settings). The values are
+  unchanged for GLOWr. GLOWpipeline 0.2.3 and GLOWanalyses 0.3.4 read the same function, so
+  the three layers can no longer disagree (the GLOWanalyses base configuration carried 0.95
+  and 11).
+- **`marginal_scan(use_SPA = TRUE)` runs with an intercept-only null model.** The SPA step
+  passed a zero-column covariate matrix to `SPAtest::ScoreTest_SPA()`, which failed with
+  "subscript out of bounds"; it now passes `cov = NULL`, as SPAtest documents for that case.
+- The comments on SPAtest's `Cutoff = "BE"` call it what SPAtest does, the level-specific
+  cutoff based on the Berry-Esseen theorem, not "Bonferroni-equivalent". `DESCRIPTION`
+  declares `GFisher (>= 0.3.2)`, the first GFisher whose HYB method weights once.
+
 # GLOWr 0.3.4
 
 - **The optimal weights are computed with an accurate quadrature and a longer Hermite

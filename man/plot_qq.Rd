@@ -4,7 +4,16 @@
 \alias{plot_qq}
 \title{QQ Plot for Marginal Analysis P-values}
 \usage{
-plot_qq(x, pvalue_col = "pvalue", ci = TRUE, title = "QQ Plot", cex = 0.5, ...)
+plot_qq(
+  x,
+  pvalue_col = "pvalue",
+  ci = TRUE,
+  title = "QQ Plot",
+  cex = 0.5,
+  thin = TRUE,
+  thin_cells_per_inch = NULL,
+  ...
+)
 }
 \arguments{
 \item{x}{A glow_marginal_scan data.frame, or a numeric vector of p-values.}
@@ -17,6 +26,12 @@ data.frame). Default: "pvalue".}
 \item{title}{Character plot title. Default: "QQ Plot".}
 
 \item{cex}{Numeric point size. Default: 0.5.}
+
+\item{thin}{Logical (default TRUE). Draw at most one point per cell of a grid at the
+marker's scale (see \code{thin_cells_per_inch}); the lambda, the expected quantiles
+and the confidence band are computed from the complete input.}
+
+\item{thin_cells_per_inch}{Numeric or NULL (default). As in \code{\link{plot_manhattan}}.}
 
 \item{...}{Additional arguments passed to \code{plot()}.}
 }
@@ -41,7 +56,10 @@ where \eqn{\chi^2_1 = \mathrm{qchisq}(1-p, 1)} for all valid p-values
 
 The 95\% confidence band is derived from the Beta distribution:
 lower bound is \eqn{\mathrm{qbeta}(0.025, i, n-i+1)} and upper bound is
-\eqn{\mathrm{qbeta}(0.975, i, n-i+1)}.
+\eqn{\mathrm{qbeta}(0.975, i, n-i+1)}, with the original \eqn{n}. It is evaluated at
+every rank among the 200 smallest p-values and at about 2,000 geometrically spaced
+ranks beyond, which draws the same smooth band with a few thousand vertices instead
+of \eqn{2n}.
 
 Complexity: O(n log n) due to sorting.
 }

@@ -11,6 +11,9 @@
 # INTERNAL HELPERS:
 #   - .cumulative_positions()    Compute x-axis positions with chromosome gaps
 #   - .chr_to_numeric()          Standardize chromosome labels to integer
+#   - .thin_cells()              Thinning grid resolution from the marker size
+#   - .thin_points()             One drawn point per grid cell, the highest kept
+#   - .qq_band_ranks()           Ranks at which the QQ confidence band is evaluated
 
 
 #################### EXPORTED MAIN FUNCTIONS ####################
@@ -37,6 +40,18 @@
 #' @param highlight_color Color for highlighted variants. Default: "red".
 #' @param title Character plot title. Default: "Manhattan Plot".
 #' @param cex Numeric point size. Default: 0.5.
+#' @param thin Logical (default TRUE). Draw at most one point per cell of a grid at the
+#'   marker's scale (see \code{thin_cells_per_inch}), which bounds the drawn points at a
+#'   few tens of thousands however many variants there are, so a whole-genome PDF stays
+#'   small. Every highlighted variant is drawn, and the point kept in a cell is its highest,
+#'   so the extremes are always visible. The axes and colors come from the complete input,
+#'   and a point outside a cropped axis range is kept and clipped as usual. At the marker's
+#'   size the drawing matches the full set; a vector PDF enlarged well beyond that scale
+#'   shows the thinning (\code{thin = FALSE} draws every point).
+#' @param thin_cells_per_inch Numeric or NULL (default). The thinning grid's cells per inch
+#'   of the plot region. NULL sets the cell to half the marker's drawn diameter
+#'   (\code{pch = 20} at the given \code{cex}: about 0.035 inch at \code{cex = 0.5},
+#'   measured at 1200 dpi), so two points in one cell overlap by most of their area.
 #' @param ... Additional arguments passed to \code{plot()}.
 #'
 #' @return \code{invisible(NULL)}.
@@ -80,7 +95,7 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
                             genome_wide_line = 5e-8, highlight = NULL,
                             chr_colors = c("grey30", "grey60"),
                             highlight_color = "red", title = "Manhattan Plot",
-                            cex = 0.5, ...) {
+                            cex = 0.5, thin = TRUE, thin_cells_per_inch = NULL, ...) {
   # Validate required columns
   missing_cols <- setdiff(c(pvalue_col, chr_col, pos_col), names(x))
   if (length(missing_cols) > 0) {
@@ -121,10 +136,11 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
   chr_rank <- match(chr_numeric, chr_levels)  # 1-based rank for each point
   col_vec <- chr_colors[(chr_rank %% 2) + 1]
 
-  # Override color for highlighted variants
+  # Highlighted variants: their own color, drawn last and never thinned away
+  is_high <- rep(FALSE, length(cum_pos))
   if (!is.null(highlight) && has_vid) {
-    highlight_idx <- vid %in% highlight
-    col_vec[highlight_idx] <- highlight_color
+    is_high <- vid %in% highlight
+    col_vec[is_high] <- highlight_color
   } else if (!is.null(highlight) && !has_vid) {
     warning("'highlight' ignored: 'variant_id' column not found in x")
   }
@@ -135,16 +151,25 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
     mean(range(cum_pos[idx]))
   }, numeric(1))
 
-  # Main plot
-  plot(cum_pos, log10p,
-       pch    = 20,
-       col    = col_vec,
-       cex    = cex,
+  # Main plot: the frame from the complete input, then the points, at most one per grid
+  # cell when `thin` (the cell is sized from the marker once the frame fixes the scale)
+  plot(range(cum_pos), range(log10p),
+       type   = "n",
        xaxt   = "n",
        xlab   = "Chromosome",
        ylab   = expression(-log[10](italic(p))),
        main   = title,
        ...)
+  keep <- if (isTRUE(thin)) {
+    .thin_points(cum_pos, log10p, .thin_cells(thin_cells_per_inch, cex))
+  } else {
+    rep(TRUE, length(cum_pos))
+  }
+  draw <- keep & !is_high
+  points(cum_pos[draw], log10p[draw], pch = 20, col = col_vec[draw], cex = cex)
+  if (any(is_high)) {
+    points(cum_pos[is_high], log10p[is_high], pch = 20, col = highlight_color, cex = cex)
+  }
 
   # Custom x-axis: chromosome labels at midpoints
   chr_labels <- as.character(chr_levels)
@@ -182,6 +207,10 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
 #' @param ci Logical: draw a 95% pointwise confidence band? Default: TRUE.
 #' @param title Character plot title. Default: "QQ Plot".
 #' @param cex Numeric point size. Default: 0.5.
+#' @param thin Logical (default TRUE). Draw at most one point per cell of a grid at the
+#'   marker's scale (see \code{thin_cells_per_inch}); the lambda, the expected quantiles
+#'   and the confidence band are computed from the complete input.
+#' @param thin_cells_per_inch Numeric or NULL (default). As in \code{\link{plot_manhattan}}.
 #' @param ... Additional arguments passed to \code{plot()}.
 #'
 #' @return The genomic inflation factor \eqn{\lambda_{GC}} (invisibly).
@@ -199,7 +228,10 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
 #'
 #' The 95% confidence band is derived from the Beta distribution:
 #' lower bound is \eqn{\mathrm{qbeta}(0.025, i, n-i+1)} and upper bound is
-#' \eqn{\mathrm{qbeta}(0.975, i, n-i+1)}.
+#' \eqn{\mathrm{qbeta}(0.975, i, n-i+1)}, with the original \eqn{n}. It is evaluated at
+#' every rank among the 200 smallest p-values and at about 2,000 geometrically spaced
+#' ranks beyond, which draws the same smooth band with a few thousand vertices instead
+#' of \eqn{2n}.
 #'
 #' Complexity: O(n log n) due to sorting.
 #'
@@ -222,7 +254,8 @@ plot_manhattan <- function(x, pvalue_col = "pvalue", chr_col = "chr",
 #'
 #' @export
 plot_qq <- function(x, pvalue_col = "pvalue", ci = TRUE,
-                     title = "QQ Plot", cex = 0.5, ...) {
+                     title = "QQ Plot", cex = 0.5,
+                     thin = TRUE, thin_cells_per_inch = NULL, ...) {
   # Extract p-values from numeric vector or data.frame
   if (is.numeric(x)) {
     pvals <- x
@@ -258,35 +291,38 @@ plot_qq <- function(x, pvalue_col = "pvalue", ci = TRUE,
   xlim_val <- range(exp_log)
   ylim_val <- c(0, max(obs_log, xlim_val[2]))
 
-  # Initial plot (points may be redrawn on top of CI band below)
-  plot(exp_log, obs_log,
-       pch  = 20,
-       cex  = cex,
+  # The frame from the complete input; the band and the points are drawn on it below
+  plot(xlim_val, ylim_val,
+       type = "n",
        xlab = expression(Expected ~ -log[10](italic(p))),
        ylab = expression(Observed ~ -log[10](italic(p))),
        main = title,
        xlim = xlim_val,
        ylim = ylim_val,
-       type = if (ci) "n" else "p",   # suppress points initially when drawing CI
        ...)
 
-  # 95% confidence band using the Beta distribution
+  # 95% confidence band from the Beta distribution of the i-th order statistic, with the
+  # original n, at a bounded selection of ranks: the same smooth band with a few thousand
+  # vertices instead of 2n
   if (ci) {
-    i_seq <- seq_len(n)
-    ci_lo <- -log10(stats::qbeta(0.975, i_seq, n - i_seq + 1))
-    ci_hi <- -log10(stats::qbeta(0.025, i_seq, n - i_seq + 1))
-
-    # Draw polygon (band in x = expected, y = ci_hi/ci_lo)
+    i_sel <- .qq_band_ranks(n)
+    ci_lo <- -log10(stats::qbeta(0.975, i_sel, n - i_sel + 1))
+    ci_hi <- -log10(stats::qbeta(0.025, i_sel, n - i_sel + 1))
     graphics::polygon(
-      x   = c(exp_log, rev(exp_log)),
-      y   = c(ci_hi,   rev(ci_lo)),
+      x   = c(exp_log[i_sel], rev(exp_log[i_sel])),
+      y   = c(ci_hi,          rev(ci_lo)),
       col = grDevices::rgb(0, 0, 1, 0.15),
       border = NA
     )
-
-    # Re-draw points on top of band
-    points(exp_log, obs_log, pch = 20, cex = cex)
   }
+
+  # Points on top of the band, at most one per grid cell when `thin`
+  keep <- if (isTRUE(thin)) {
+    .thin_points(exp_log, obs_log, .thin_cells(thin_cells_per_inch, cex))
+  } else {
+    rep(TRUE, n)
+  }
+  points(exp_log[keep], obs_log[keep], pch = 20, cex = cex)
 
   # Identity line
   abline(0, 1, col = "red", lwd = 1.5)
@@ -361,6 +397,87 @@ plot.glow_marginal_scan <- function(x, type = "manhattan", ...) {
 
 
 #################### INTERNAL HELPER FUNCTIONS ####################
+
+#' Thinning Grid Resolution From the Marker Size
+#'
+#' Cells per inch of the plot region: the caller's value when given, else half the drawn
+#' diameter of \code{pch = 20} at \code{cex}. The diameter grows about linearly with
+#' \code{cex}: 0.035 inch at 0.5 and 0.060 inch at 1 (measured on a 1200 dpi raster), so
+#' it is taken as \eqn{0.010 + 0.050\,\mathrm{cex}} inch.
+#'
+#' @param cells_per_inch Numeric or NULL.
+#' @param cex Numeric marker expansion.
+#' @return A positive number, cells per inch.
+#' @keywords internal
+#' @noRd
+.thin_cells <- function(cells_per_inch, cex) {
+  if (!is.null(cells_per_inch)) {
+    stopifnot(is.numeric(cells_per_inch), length(cells_per_inch) == 1L,
+              is.finite(cells_per_inch), cells_per_inch > 0)
+    return(cells_per_inch)
+  }
+  diam_in <- 0.010 + 0.050 * cex
+  2 / diam_in
+}
+
+
+#' One Drawn Point per Grid Cell, the Highest Kept
+#'
+#' Maps the points to the cells of a grid over the plot region of the current frame
+#' (\code{par("usr")} and \code{par("pin")}) and keeps, per cell, the point with the
+#' largest y. Two points in one cell overlap at the marker's size, so at that scale the
+#' picture is the full set's; a vector PDF enlarged well beyond it shows the thinning. A
+#' logarithmic axis is mapped as \code{par("usr")} is, and a point outside the plot region
+#' is kept without taking a cell, so a cropped axis hides nothing the full set would show.
+#'
+#' @param x,y Numeric user coordinates (untransformed; a log axis is handled here).
+#' @param cells_per_inch Numeric grid resolution.
+#' @return Logical vector, TRUE for the points to draw.
+#' @keywords internal
+#' @noRd
+.thin_points <- function(x, y, cells_per_inch) {
+  usr <- graphics::par("usr")
+  pin <- graphics::par("pin")
+  # par("usr") is on the log10 scale for a logarithmic axis; map the coordinates the same way
+  if (isTRUE(graphics::par("xlog"))) x <- log10(x)
+  if (isTRUE(graphics::par("ylog"))) y <- log10(y)
+  nx <- max(1, ceiling(pin[1L] * cells_per_inch))
+  ny <- max(1, ceiling(pin[2L] * cells_per_inch))
+  # A point outside the plot region (a cropped axis) takes no cell and is kept: the device
+  # clips it as it would without thinning, and it cannot hide a visible point in its cell.
+  inside <- is.finite(x) & is.finite(y) &
+            x >= usr[1L] & x <= usr[2L] & y >= usr[3L] & y <= usr[4L]
+  keep <- !inside
+  ix <- floor((x[inside] - usr[1L]) / (usr[2L] - usr[1L]) * nx)
+  iy <- floor((y[inside] - usr[3L]) / (usr[4L] - usr[3L]) * ny)
+  ix <- pmin(ix, nx - 1)                   # the upper edge belongs to the last cell
+  iy <- pmin(iy, ny - 1)
+  cell <- ix * ny + iy                     # one number per (ix, iy); exact in double
+  yi <- y[inside]
+  o <- order(yi, decreasing = TRUE)        # the highest point of a cell is the one kept
+  k <- logical(length(yi))
+  k[o[!duplicated(cell[o])]] <- TRUE
+  keep[inside] <- k
+  keep
+}
+
+
+#' Ranks at Which the QQ Confidence Band Is Evaluated
+#'
+#' Every rank among the \code{dense} smallest p-values, then \code{geometric} ranks spaced
+#' geometrically up to \code{n}, and \code{n} itself; all ranks when \code{n} is small.
+#'
+#' @param n Integer number of p-values.
+#' @param dense,geometric Integers.
+#' @return Sorted integer vector of distinct ranks in \code{1:n}.
+#' @keywords internal
+#' @noRd
+.qq_band_ranks <- function(n, dense = 200L, geometric = 2000L) {
+  if (n <= dense + 1L) return(seq_len(n))
+  geo <- round(exp(seq(log(dense), log(n), length.out = geometric)))
+  sort(unique(c(seq_len(dense), as.integer(geo), as.integer(n))))
+}
+
 
 #' Convert Chromosome Labels to Integer
 #'

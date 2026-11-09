@@ -11,7 +11,8 @@ compute_ld_scores(
   segment = 2000L,
   sample_n = 0L,
   seed = 1L,
-  verbose = 1
+  verbose = 1,
+  n_cores = 1L
 )
 }
 \arguments{
@@ -35,6 +36,12 @@ individuals is used as the LD reference (default \code{0L} = all samples).}
 \code{1L}); unused when \code{sample_n = 0L}.}
 
 \item{verbose}{Integer verbosity (0 = silent, 1 = a one-line summary).}
+
+\item{n_cores}{Integer (default \code{1L}). Forked workers over which the core segments
+are spread (\code{parallel::mclapply}). Each worker opens its own read-only handle on
+\code{gds_file} and computes whole segments with their flanking windows, so the table
+is the one the serial loop writes. Not available on Windows (no fork): a value above 1
+warns and runs with one worker.}
 }
 \value{
 A \code{data.frame} with one row per biallelic SNV:
@@ -56,8 +63,15 @@ so the LD score is \eqn{\ell_j = \sum_{k:\,|\mathrm{pos}_k-\mathrm{pos}_j|\le w}
 \eqn{[\mathrm{segment} \pm \mathrm{window}]} are read, mean-imputed,
 column-standardised, and a single BLAS cross-product gives the
 window-by-core correlation block, from which each core variant's LD score is
-a \eqn{\pm}\code{window} prefix-sum over \eqn{\tilde r^2}. Peak memory is
-bounded by one segment plus its flanks, never a whole chromosome.
+a \eqn{\pm}\code{window} prefix-sum over \eqn{\tilde r^2}, the window inclusive
+at both ends. The file's storage order need not be position order: the genotype
+columns are put in position order after they are read. Peak memory is bounded by one
+segment plus its flanks, never a whole chromosome: per worker, the standardized
+genotypes of the segment and its two flanks (8 bytes per sample per variant) plus
+three matrices of the flanked window by the segment. With \code{n_cores > 1} the
+segments are split into contiguous blocks and each block runs in a forked worker on
+its own GDS handle, each holding its own matrices; a segment always reads its full
+flank, so the result does not depend on \code{n_cores}.
 
 \strong{Single-chromosome contract.} Positions repeat across chromosomes, so
 the \eqn{\pm}\code{window} mask is only meaningful within one chromosome;
