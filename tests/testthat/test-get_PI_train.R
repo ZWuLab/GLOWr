@@ -805,3 +805,35 @@ test_that("load_PI_models errors on empty directory", {
     "No model files matching pattern"
   )
 })
+
+# ------------------------------------------------------------------------------
+# The row count of a control CSV file, with and without a shell
+# ------------------------------------------------------------------------------
+
+test_that("the rows of a control CSV file are counted without the shell", {
+  f <- tempfile(fileext = ".csv")
+  on.exit(unlink(f), add = TRUE)
+  utils::write.csv(data.frame(VarInfo = sprintf("22-%d-A-G", 1:37), cadd_phred = seq(0, 36)),
+                   f, row.names = FALSE)
+  # the route of a system without a shell for system(), such as Windows
+  expect_identical(.count_csv_rows(f, use_wc = FALSE), 37L)
+  # the default of the system the test runs on gives the same count
+  expect_identical(.count_csv_rows(f), 37L)
+})
+
+test_that("the shell's count and the count from the file agree, and a shell without wc falls back", {
+  skip_on_os("windows")                       # the shell route is the one of a Unix-alike
+  f <- tempfile(fileext = ".csv")
+  on.exit(unlink(f), add = TRUE)
+  utils::write.csv(data.frame(VarInfo = sprintf("22-%d-A-G", 1:120), linsight = (1:120) / 120),
+                   f, row.names = FALSE)
+  expect_identical(.count_csv_rows(f, use_wc = TRUE), 120L)
+  expect_identical(.count_csv_rows(f, use_wc = TRUE), .count_csv_rows(f, use_wc = FALSE))
+  # with no program on the search path the shell prints no count, and the file is read
+  old_path <- Sys.getenv("PATH")
+  on.exit(Sys.setenv(PATH = old_path), add = TRUE)
+  Sys.setenv(PATH = "")
+  n <- .count_csv_rows(f, use_wc = TRUE)
+  Sys.setenv(PATH = old_path)
+  expect_identical(n, 120L)
+})

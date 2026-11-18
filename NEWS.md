@@ -1,3 +1,13 @@
+# GLOWr 0.3.7
+
+- **`train_PI_models()` reads a folder of control CSV files on Windows.** The loader counted the
+  rows of each control file with the shell call `wc -l < file`. R on Windows passes a command
+  to no shell, so the redirection failed there and the training stopped before any file was
+  read. The public check of 0.3.6 on Windows found it, through the test of `control_format`
+  that builds its own control files. The count now uses the shell only on a Unix-alike and
+  reads the first column of the file elsewhere, or when the shell gives no count. Results on
+  Linux and macOS are unchanged: the same rows are counted and sampled as in 0.3.6.
+
 # GLOWr 0.3.6
 
 - **The help of `compute_pcs_gds()` states the LD-pruning threshold as the code applies it.**

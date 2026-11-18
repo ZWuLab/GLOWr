@@ -643,16 +643,7 @@ save_PI_models <- function(models, output_dir, prefix = "model_") {
 #' @noRd
 .load_csv_with_proportional_sampling <- function(files, features, max_controls) {
   # Step 1: Count rows in each file (fast - just count lines)
-  row_counts <- vapply(files, function(f) {
-    # Use wc -l for fast line counting (subtract 1 for header)
-    result <- tryCatch({
-      as.integer(system(paste("wc -l <", shQuote(f)), intern = TRUE)) - 1L
-    }, error = function(e) {
-      # Fallback: read with nrows to count
-      nrow(data.table::fread(f, select = 1L, data.table = FALSE))
-    })
-    result
-  }, integer(1))
+  row_counts <- vapply(files, .count_csv_rows, integer(1))
 
   total_rows <- sum(row_counts)
 
@@ -716,6 +707,51 @@ save_PI_models <- function(models, output_dir, prefix = "model_") {
   # Remove NULLs and combine
   data_list <- data_list[!vapply(data_list, is.null, logical(1))]
   do.call(rbind, data_list)
+}
+
+
+#' Count the Data Rows of a CSV File
+#'
+#' @description
+#' Internal function that gives the number of rows of a CSV file below its header
+#' line. On a Unix-alike it counts the lines with \code{wc -l} through the shell,
+#' which reads no value and is fast for a file of millions of rows. Where there is no
+#' such shell (R on Windows passes the command to no shell, so the redirection is not
+#' understood), or when the shell gives no single count, it reads the first column of
+#' the file and counts its rows.
+#'
+#' @details
+#' The two counts agree for a file whose last line ends with a line break and whose
+#' fields hold no line break, which is what \code{write.csv()} and
+#' \code{data.table::fwrite()} write. For a file without a line break at its end the
+#' shell's count is one lower than the number of rows. The shell's count is kept on a
+#' Unix-alike so that the rows sampled from such a file are those of earlier versions.
+#'
+#' @param f Path of one CSV file with a header line.
+#' @param use_wc Logical. Count with the shell's \code{wc -l}; the default is
+#'   \code{TRUE} on a Unix-alike and \code{FALSE} elsewhere.
+#'
+#' @return One integer, the number of data rows.
+#'
+#' @keywords internal
+#' @noRd
+.count_csv_rows <- function(f, use_wc = identical(.Platform$OS.type, "unix")) {
+  n <- NA_integer_
+  if (isTRUE(use_wc)) {
+    # the lines of the file, less one for the header; the redirection keeps the file name
+    # out of the output, so the output is the count alone
+    out <- tryCatch(
+      suppressWarnings(system(paste("wc -l <", shQuote(f)), intern = TRUE)),
+      error = function(e) character(0)
+    )
+    lines <- suppressWarnings(as.integer(trimws(out)))
+    if (length(lines) == 1L && !is.na(lines)) n <- lines - 1L
+  }
+  if (is.na(n)) {
+    # no shell, or no single count from it: the rows of the first column
+    n <- nrow(data.table::fread(f, select = 1L, data.table = FALSE, showProgress = FALSE))
+  }
+  as.integer(n)
 }
 
 
