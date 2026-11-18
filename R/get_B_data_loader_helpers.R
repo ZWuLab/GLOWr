@@ -1018,6 +1018,10 @@ extract_sample_size_from_text <- function(text_values, verbose = TRUE) {
 #' - For character columns: uses grepl (case-insensitive partial matching)
 #' - For numeric columns: uses exact matching (==, %in%)
 #'
+#' Filter values given as text for a numeric column are compared as numbers
+#' (\code{.filter_values_for_column()}), so \code{"1e3"} and \code{"100000"} match
+#' the numbers 1000 and 100000. A text value that is not a number stops the call.
+#'
 #' @keywords internal
 #' @noRd
 .apply_general_filters <- function(data, include = NULL, exclude = NULL,
@@ -1054,7 +1058,7 @@ extract_sample_size_from_text <- function(text_values, verbose = TRUE) {
         }
       } else {
         # Exact matching (works for both character and numeric)
-        keep_idx <- col_data %in% filter_values
+        keep_idx <- col_data %in% .filter_values_for_column(filter_values, col_data, col_name)
       }
 
       # Handle NAs (exclude them by default)
@@ -1106,7 +1110,7 @@ extract_sample_size_from_text <- function(text_values, verbose = TRUE) {
         }
       } else {
         # Exact matching (works for both character and numeric)
-        remove_idx <- col_data %in% filter_values
+        remove_idx <- col_data %in% .filter_values_for_column(filter_values, col_data, col_name)
       }
 
       # Handle NAs (keep them by default - only remove explicit matches)
@@ -1136,6 +1140,82 @@ extract_sample_size_from_text <- function(text_values, verbose = TRUE) {
   }
 
   return(data)
+}
+
+
+#' Filter Values in the Type of the Column They Are Compared With
+#'
+#' @description
+#' Returns the values of one inclusion or exclusion filter in the form that an exact
+#' comparison with the column needs. Values given as text are converted to numbers for a
+#' numeric column, to 64-bit integers for a column of that class, and to \code{TRUE} or
+#' \code{FALSE} for a logical column. Every other combination is returned unchanged.
+#'
+#' @param filter_values Vector. The values of the filter for one column.
+#' @param col_data Vector. The column of the data that the values are compared with.
+#' @param col_name Character. The name of the column, for the error message.
+#'
+#' @return The filter values in the type of \code{col_data} when they were text and the
+#'   column is numeric, \code{integer64} or logical, otherwise as given.
+#'
+#' @details
+#' R compares a number with text by turning the number into text, so
+#' \code{100000 \%in\% "100000"} is \code{FALSE} (the number becomes \code{"1e+05"}), and
+#' \code{1000 \%in\% "1e3"} is \code{FALSE} too. In the same way \code{TRUE \%in\% "true"}
+#' is \code{FALSE}. A filter read from a text source, such as a YAML configuration,
+#' therefore silently matched no row of such a column. Converting the values makes the
+#' comparison one of numbers, or of logical values. A missing value stays missing. A text
+#' value that cannot be converted is an error, because it can match no row of the column.
+#'
+#' A column of class \code{integer64} (as \code{data.table::fread()} gives for integers
+#' beyond 32 bits) is handled before the numeric case, and its values are converted by
+#' \code{bit64::as.integer64()} from the text itself. A conversion through a double would
+#' round an integer beyond \eqn{2^{53}} and match the wrong row. Only whole numbers in
+#' digits, within the range of a 64-bit integer, are accepted for such a column: a number
+#' beyond that range would convert to another value and match a row it does not name. The
+#' \code{bit64} package is needed for such a column, and the function stops without it.
+#'
+#' For a logical column the accepted words are those of \code{as.logical()}:
+#' \code{TRUE}, \code{true}, \code{True}, \code{T}, \code{FALSE}, \code{false},
+#' \code{False} and \code{F}.
+#'
+#' Computational complexity: O(length(filter_values)).
+#'
+#' @keywords internal
+#' @noRd
+.filter_values_for_column <- function(filter_values, col_data, col_name) {
+  if (!is.character(filter_values)) return(filter_values)
+  bad <- function(not_ok, kind)
+    stop(sprintf("The filter on column '%s' has value(s) that are not %s (%s), and the column is %s.",
+                 col_name, kind[1L], paste(sprintf("'%s'", filter_values[not_ok]), collapse = ", "), kind[2L]),
+         call. = FALSE)
+  text <- trimws(filter_values)
+  if (inherits(col_data, "integer64")) {
+    if (!requireNamespace("bit64", quietly = TRUE))
+      stop(sprintf("The filter on column '%s' needs the package bit64: the column holds 64-bit integers.", col_name),
+           call. = FALSE)
+    not_whole <- !is.na(text) & !grepl("^[+-]?[0-9]+$", text)
+    if (any(not_whole)) bad(not_whole, c("whole numbers in digits", "of 64-bit integers"))
+    converted <- suppressWarnings(bit64::as.integer64(text))
+    # A number beyond the range of a 64-bit integer does not convert to itself (it becomes
+    # missing, or the largest value). It can match no row, so it is an error, not a filter.
+    canonical <- sub("^(-?)0+(?=[0-9])", "\\1", sub("^\\+", "", text), perl = TRUE)
+    canonical[!is.na(canonical) & canonical == "-0"] <- "0"      # zero has one form, also when written -0
+    out_of_range <- !is.na(text) & (is.na(converted) | as.character(converted) != canonical)
+    if (any(out_of_range)) bad(out_of_range, c("within the range of a 64-bit integer", "of 64-bit integers"))
+    return(converted)
+  }
+  if (is.logical(col_data)) {
+    as_logical <- as.logical(text)
+    not_logical <- is.na(as_logical) & !is.na(text) & text != "NA"
+    if (any(not_logical)) bad(not_logical, c("true or false", "logical"))
+    return(as_logical)
+  }
+  if (!is.numeric(col_data)) return(filter_values)
+  as_number <- suppressWarnings(as.numeric(filter_values))
+  not_number <- is.na(as_number) & !is.na(filter_values)
+  if (any(not_number)) bad(not_number, c("numbers", "numeric"))
+  as_number
 }
 
 

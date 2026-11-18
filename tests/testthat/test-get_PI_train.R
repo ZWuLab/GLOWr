@@ -522,6 +522,87 @@ test_that("train_PI_models is reproducible with seed", {
   unlink(output_dir2, recursive = TRUE)
 })
 
+# ------------------------------------------------------------------------------
+# control_format, on control files that the tests build themselves
+# ------------------------------------------------------------------------------
+
+# A case CSV, and a control folder that holds one CSV file and one GDS file for chromosome 22.
+# The two control files differ in their number of variants and share no variant, so a test can
+# tell which of them was read. The GDS file is the synthetic annotated GDS of
+# helper-create-test-agds.R (which skips the calling test where the GDS packages are missing).
+# The builder leaves the random number stream as it found it: the CSV values are computed by
+# arithmetic, and the seed that the first build of the synthetic GDS sets is put back. It removes
+# its folder when it does not return one (a skip, an error), and the caller removes it otherwise.
+.make_mixed_control_folder <- function(n_case = 40L, n_csv = 60L) {
+  root <- tempfile("pi_mixed_"); dir.create(root)
+  built <- FALSE
+  on.exit(if (!built) unlink(root, recursive = TRUE), add = TRUE)
+  had_seed <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  seed <- if (had_seed) get(".Random.seed", envir = globalenv(), inherits = FALSE)
+  on.exit(if (had_seed) assign(".Random.seed", seed, envir = globalenv())
+          else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv()), add = TRUE)
+  ctrl_dir <- file.path(root, "controls"); dir.create(ctrl_dir)
+  gds_file <- file.path(ctrl_dir, "chr22_controls.gds")
+  create_test_agds(gds_file)                                                     # its first build calls set.seed()
+  features <- c("cadd_phred", "linsight", "fathmm_xf", "apc_conservation_v2")   # four numeric nodes of that GDS
+  annotation_table <- function(n, shift) {
+    i <- seq_len(n)
+    data.frame(VarInfo = sprintf("22-%d-A-G", 50000L + shift + i),               # positions beyond those of the GDS
+               cadd_phred = ((i * 37 + shift) %% 101) / 101 * 40,
+               linsight = ((i * 53 + shift) %% 97) / 97,
+               fathmm_xf = ((i * 29 + shift) %% 89) / 89,
+               apc_conservation_v2 = ((i * 41 + shift) %% 83) / 83 * 50)
+  }
+  case_csv <- file.path(root, "cases.csv")
+  ctrl_csv <- file.path(ctrl_dir, "chr22_controls.csv")
+  utils::write.csv(annotation_table(n_case, 0L), case_csv, row.names = FALSE)
+  utils::write.csv(annotation_table(n_csv, 1000L), ctrl_csv, row.names = FALSE)
+  gds <- SeqArray::seqOpen(gds_file, readonly = TRUE)
+  n_gds <- length(SeqArray::seqGetData(gds, "variant.id"))                        # counted from the file, never assumed
+  SeqArray::seqClose(gds)
+  built <- TRUE
+  list(root = root, case_csv = case_csv, ctrl_dir = ctrl_dir, ctrl_csv = ctrl_csv, features = features,
+       n_csv = n_csv, n_gds = n_gds)
+}
+
+test_that("train_PI_models trains on the control files of the format that is named", {
+  # (review 2026-11-16) The training always detected the format, so a control folder with CSV and
+  # GDS files was read as CSV also when the caller meant the GDS files.
+  fx <- .make_mixed_control_folder()
+  on.exit(unlink(fx$root, recursive = TRUE), add = TRUE)
+  expect_false(fx$n_csv == fx$n_gds)        # the number of controls tells the two formats apart
+  controls_read <- function(...) {
+    out <- tempfile("piModels_"); on.exit(unlink(out, recursive = TRUE))
+    # (a small generated fixture may give a separable fit, which glm warns about; the test is
+    #  about which control files the training read)
+    suppressWarnings(train_PI_models(case_csv = fx$case_csv, control_source = fx$ctrl_dir, output_dir = out, n_models = 1,
+                                     controls_per_model = 30, model_type = "GLM", features = fx$features, chromosomes = 22,
+                                     random_seed = 1, verbose = 0, ...))$metadata$n_controls
+  }
+  expect_equal(controls_read(), fx$n_csv)                             # the default detects, and reads such a folder as CSV
+  expect_equal(controls_read(control_format = "auto"), fx$n_csv)
+  expect_equal(controls_read(control_format = "csv"), fx$n_csv)
+  expect_equal(controls_read(control_format = "gds"), fx$n_gds)       # the GDS file, when it is named
+  expect_error(controls_read(control_format = "agds"), "should be one of")
+})
+
+test_that("a control folder with CSV and GDS files is read in the format that is named", {
+  set.seed(20261117); before <- .Random.seed
+  fx <- .make_mixed_control_folder()
+  on.exit(unlink(fx$root, recursive = TRUE), add = TRUE)
+  expect_identical(.Random.seed, before)                              # the builder left the random number stream alone
+  csv_variants <- utils::read.csv(fx$ctrl_csv, stringsAsFactors = FALSE)$VarInfo
+  from_gds <- load_control_annotations(fx$ctrl_dir, chromosomes = 22, features = fx$features, format = "gds")
+  from_csv <- load_control_annotations(fx$ctrl_dir, chromosomes = 22, features = fx$features, format = "csv")
+  expect_message(from_auto <- load_control_annotations(fx$ctrl_dir, chromosomes = 22, features = fx$features),
+                 "Both CSV and GDS files found. Using CSV format.")
+  expect_equal(nrow(from_gds), fx$n_gds)
+  expect_false(any(rownames(from_gds) %in% csv_variants))             # the variants of the GDS file only
+  expect_identical(rownames(from_csv), csv_variants)                  # the variants of the CSV file only
+  expect_identical(from_auto, from_csv)
+  expect_identical(colnames(from_gds), fx$features)
+})
+
 test_that("train_PI_models supports LASSO model type", {
   skip_if_no_test_data()
 

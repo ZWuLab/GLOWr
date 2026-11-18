@@ -12,11 +12,15 @@
 #' @param n_samples Integer. Number of samples.
 #' @param n_variants Integer. Number of variants.
 #' @param chromosomes Character vector. Chromosome labels to assign.
+#' @param geno Integer matrix or NULL. Genotypes (0, 1, 2), variants in rows and samples in
+#'   columns. NULL (default) draws random genotypes. A matrix sets \code{n_samples} and
+#'   \code{n_variants} from its dimensions.
 #' @return Character. The file path (for chaining).
 create_test_seqarray_gds <- function(file_path,
                                      n_samples = 50L,
                                      n_variants = 200L,
-                                     chromosomes = c("1", "2")) {
+                                     chromosomes = c("1", "2"),
+                                     geno = NULL) {
   # Requires SNPRelate, SeqArray, and gdsfmt
   if (!requireNamespace("SNPRelate", quietly = TRUE)) return(NULL)
   if (!requireNamespace("SeqArray", quietly = TRUE)) return(NULL)
@@ -27,12 +31,17 @@ create_test_seqarray_gds <- function(file_path,
   temp_snp <- tempfile(fileext = ".gds")
   on.exit(unlink(temp_snp), add = TRUE)
 
-  # Generate random genotype matrix (0, 1, 2)
-  set.seed(123L)
-  geno <- matrix(
-    sample(0L:2L, n_samples * n_variants, replace = TRUE),
-    nrow = n_variants, ncol = n_samples
-  )
+  # Generate random genotype matrix (0, 1, 2), unless the caller supplies one
+  if (is.null(geno)) {
+    set.seed(123L)
+    geno <- matrix(
+      sample(0L:2L, n_samples * n_variants, replace = TRUE),
+      nrow = n_variants, ncol = n_samples
+    )
+  } else {
+    n_variants <- nrow(geno)
+    n_samples <- ncol(geno)
+  }
 
   # Assign chromosomes evenly across variants
   chr_labels <- rep(chromosomes, length.out = n_variants)
@@ -776,4 +785,60 @@ test_that("compute_pcs_gds cleans up temp files on error", {
   expect_error(
     compute_pcs_gds(gds_files = tmp, n_pcs = 3L, verbose = 0L)
   )
+})
+
+
+# ==============================================================================
+# GROUP: THE LD THRESHOLD IS ON THE ABSOLUTE CORRELATION
+# ==============================================================================
+
+test_that("compute_pcs_gds prunes on the absolute correlation, not on r squared", {
+  skip_if_not_installed("SNPRelate")
+  skip_if_not_installed("SeqArray")
+  skip_if_not_installed("gdsfmt")
+
+  # Six pairs of variants on one chromosome. Within a pair the second variant copies the
+  # first for about 60 percent of the samples and is drawn afresh for the others, so the
+  # correlation within a pair is near 0.6 and its square near 0.36. Different pairs are
+  # independent draws.
+  set.seed(20261116L)
+  n_samples <- 400L
+  n_pairs <- 6L
+  geno <- matrix(0L, nrow = 2L * n_pairs, ncol = n_samples)
+  for (k in seq_len(n_pairs)) {
+    first <- rbinom(n_samples, 2L, 0.3)
+    fresh <- rbinom(n_samples, 2L, 0.3)
+    geno[2L * k - 1L, ] <- first
+    geno[2L * k, ] <- ifelse(runif(n_samples) < 0.6, first, fresh)
+  }
+  threshold <- 0.45
+
+  # The premises of the test, checked on the genotypes drawn: within a pair the absolute
+  # correlation is above the threshold and its square below it, and across pairs the
+  # absolute correlation is below the threshold.
+  r <- abs(cor(t(geno)))
+  pair_of <- rep(seq_len(n_pairs), each = 2L)
+  within <- outer(pair_of, pair_of, "==") & upper.tri(r)
+  across <- outer(pair_of, pair_of, "!=")
+  expect_true(all(r[within] > threshold))
+  expect_true(all(r[within]^2 < threshold))
+  expect_true(all(r[across] < threshold))
+
+  gds_path <- file.path(tempdir(), "test_ld_semantics.gds")
+  on.exit(unlink(gds_path), add = TRUE)
+  result <- create_test_seqarray_gds(gds_path, chromosomes = "1", geno = geno)
+  if (is.null(result)) skip("Could not create test GDS file")
+
+  pcs <- compute_pcs_gds(
+    gds_files = gds_path,
+    n_pcs = 2L,
+    maf_threshold = 0.01,
+    ld_threshold = threshold,
+    seed = 1L,
+    verbose = 0L
+  )
+
+  # A threshold on the absolute correlation keeps one variant of every pair (6). A
+  # threshold on r squared would keep all 12.
+  expect_equal(attr(pcs, "n_variants_used"), n_pairs)
 })

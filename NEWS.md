@@ -1,3 +1,44 @@
+# GLOWr 0.3.6
+
+- **The help of `compute_pcs_gds()` states the LD-pruning threshold as the code applies it.**
+  The argument `ld_threshold` was documented as a threshold on the squared correlation, and
+  the progress message printed `LD r2 <`. The function prunes with
+  `SNPRelate::snpgdsLDpruning(method = "corr")`, whose threshold is on the absolute genotype
+  correlation. The help page and the message now say so: the default 0.2 keeps variants whose
+  absolute correlation with the variants already kept is at most 0.2. That corresponds to a
+  squared correlation of 0.04, so it is stricter than a threshold of 0.2 on the squared
+  correlation. The computation and the default are unchanged, so principal components
+  computed with earlier versions stay as they are. A new test builds pairs of variants for
+  which the two readings keep different numbers of variants and checks the count.
+- **Inclusion and exclusion filters given as text match a numeric column.**
+  `prepare_B_training_data()` and `prepare_PI_case_data()` compared the values of
+  `filter_include` and `filter_exclude` with a column by R's `%in%`. For a numeric column and
+  values given as text, R turns the numbers into text first, so `"100000"` (the number
+  prints as `1e+05`), `"1e3"` and `"0.50"` matched no row, without a message. Text values
+  for a numeric column are now converted to numbers before the comparison, and a value that
+  is not a number stops the call with the column named. Text values for a logical column
+  (`"true"`, `"false"`) are converted in the same way, where before they matched no row. A
+  column of 64-bit integers (class `integer64`, as `data.table::fread()` reads integers
+  beyond 32 bits) gets its text values converted by `bit64::as.integer64()`, digit for
+  digit, so an identifier beyond 2^53 matches its own row. A value beyond the range of a
+  64-bit integer stops the call, and so does such a column when the package `bit64` is not
+  installed. Filters given as numbers, and
+  filters on text columns, behave as before. The membership tests of a variant filter's
+  annotation clauses (a vector of accepted values, and `annotation_predicate("in")` or
+  `"not_in"`) follow the same rules.
+- **`train_PI_models()` takes the format of the control files.** The new argument
+  `control_format` (`"auto"`, `"csv"` or `"gds"`) is passed to `load_control_annotations()`.
+  Before, the training always detected the format, and a control folder that holds both
+  CSV and GDS files was read as CSV, also when the evaluation was told to read the GDS
+  files. The default `"auto"` keeps the earlier behavior.
+- **`prepare_PI_case_data()` no longer lists the option `qc_filters$filter_indels`.** The
+  option was documented ("remove insertion/deletion variants") and part of the default list,
+  and no code applied it, so `filter_indels = TRUE` returned the indels without a message. The
+  option is removed from the help page and the default list. `filter_indels = TRUE` now stops
+  with a message that says to remove indels from the input before the call. A `FALSE` or
+  absent value behaves as before, so existing calls that do not ask for the filter give the
+  same result.
+
 # GLOWr 0.3.5
 
 - **The single-variant Manhattan and QQ plots draw at most one point per grid cell.**

@@ -31,9 +31,11 @@ inclusion. Must be in \eqn{[0, 0.5]}. Default: 0.05.}
 with missing rate above this threshold are excluded. Must be in
 \eqn{[0, 1]}. Default: 0.05.}
 
-\item{ld_threshold}{Numeric. LD pruning \eqn{r^2} threshold. Variants
-with pairwise \eqn{r^2} above this threshold are pruned. Must be in
-(0, 1]. Default: 0.2.}
+\item{ld_threshold}{Numeric. LD pruning threshold on the absolute genotype
+correlation \eqn{|r|}, not on \eqn{r^2}. A variant is pruned when its
+\eqn{|r|} with a variant already kept in the sliding window is above this
+threshold (\code{SNPRelate::snpgdsLDpruning()} with \code{method = "corr"}).
+Must be in (0, 1]. Default: 0.2, which corresponds to \eqn{r^2 = 0.04}.}
 
 \item{output_file}{Character or NULL. Optional path to save results.
 Extension determines format: \code{.rds} uses \code{saveRDS()} (preserves

@@ -35,7 +35,6 @@
 #'     \item remove_duplicates: Remove duplicate rsIDs (default: TRUE)
 #'     \item duplicate_priority: Column for duplicate resolution (default: "N")
 #'     \item filter_autosomes: Keep only chromosomes 1-22 (default: TRUE)
-#'     \item filter_indels: Remove insertion/deletion variants (default: FALSE)
 #'     \item remove_na: Remove rows with NA in required columns (default: TRUE)
 #'     \item remove_na_cols: Columns requiring non-NA values (default: c("rsID", "CHR", "POS"))
 #'   }
@@ -225,7 +224,6 @@ prepare_PI_case_data <- function(
     remove_duplicates = TRUE,
     duplicate_priority = "N",
     filter_autosomes = TRUE,
-    filter_indels = FALSE,
     remove_na = TRUE,
     remove_na_cols = c("rsID", "CHR", "POS")
   ),
@@ -233,6 +231,15 @@ prepare_PI_case_data <- function(
   exclude_chromosomes = NULL,
   verbose = 1
 ) {
+
+  # The option filter_indels was documented through GLOWr 0.3.5 and never applied. It was
+  # removed in 0.3.6. A request for it stops here, so that no user believes indels were
+  # removed. A FALSE or absent value is the behavior the function always had.
+  if (isTRUE(qc_filters$filter_indels)) {
+    stop("qc_filters$filter_indels is not supported: the option was removed in GLOWr 0.3.6 ",
+         "(it was documented and never applied). Remove indels from the input before the ",
+         "call, or keep them.", call. = FALSE)
+  }
 
   # ========== Step 1: Load Data ==========
 

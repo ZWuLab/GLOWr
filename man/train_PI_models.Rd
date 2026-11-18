@@ -16,7 +16,8 @@ train_PI_models(
   features = NULL,
   chromosomes = 1:22,
   random_seed = NULL,
-  verbose = 1
+  verbose = 1,
+  control_format = "auto"
 )
 }
 \arguments{
@@ -58,6 +59,12 @@ Default: 1:22.}
 sampling operations (control loading and model training). Default: NULL.}
 
 \item{verbose}{Verbosity level: 0 (silent), 1 (progress), 2 (detailed).}
+
+\item{control_format}{The format of the control files in \code{control_source}:
+\code{"auto"} (default), \code{"csv"} or \code{"gds"}. \code{"auto"} looks at the files of a
+directory and takes the CSV files when it holds both kinds. Name the format when a
+directory holds both and the GDS files are meant. Passed to
+\code{\link{load_control_annotations}}.}
 }
 \value{
 A list with components:

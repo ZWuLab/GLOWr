@@ -11,8 +11,7 @@ prepare_PI_case_data(
   filter_include = NULL,
   filter_exclude = NULL,
   qc_filters = list(remove_duplicates = TRUE, duplicate_priority = "N", filter_autosomes
-    = TRUE, filter_indels = FALSE, remove_na = TRUE, remove_na_cols = c("rsID", "CHR",
-    "POS")),
+    = TRUE, remove_na = TRUE, remove_na_cols = c("rsID", "CHR", "POS")),
   exclude_authors = NULL,
   exclude_chromosomes = NULL,
   verbose = 1
@@ -43,7 +42,6 @@ Ignored for columns in filter_include}
 \item remove_duplicates: Remove duplicate rsIDs (default: TRUE)
 \item duplicate_priority: Column for duplicate resolution (default: "N")
 \item filter_autosomes: Keep only chromosomes 1-22 (default: TRUE)
-\item filter_indels: Remove insertion/deletion variants (default: FALSE)
 \item remove_na: Remove rows with NA in required columns (default: TRUE)
 \item remove_na_cols: Columns requiring non-NA values (default: c("rsID", "CHR", "POS"))
 }}

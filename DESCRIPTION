@@ -1,8 +1,8 @@
 Package: GLOWr
 Type: Package
 Title: inteGrative anaLysis using Optimized Weights (GLOW) for Rare Variant Analysis
-Version: 0.3.5
-Date: 2026-11-09
+Version: 0.3.6
+Date: 2026-11-18
 Authors@R: c(
     person("Hong", "Zhang", email = "consistencyzhang@gmail.com", role = "aut"),
     person("Ming", "Liu", email = "mliu5@wpi.edu", role = "aut"),
@@ -35,6 +35,7 @@ Imports: stats,
 LinkingTo: Rcpp,
     RcppArmadillo
 Suggests: arrow,
+    bit64,
     MASS,
     mvtnorm,
     testthat (>= 3.0.0),

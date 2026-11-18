@@ -29,6 +29,11 @@ NULL
 #'     \item A directory containing \code{chr*.csv} or \code{chr*.gds} files
 #'     \item A single CSV or GDS file
 #'   }
+#' @param control_format The format of the control files in \code{control_source}:
+#'   \code{"auto"} (default), \code{"csv"} or \code{"gds"}. \code{"auto"} looks at the files of a
+#'   directory and takes the CSV files when it holds both kinds. Name the format when a
+#'   directory holds both and the GDS files are meant. Passed to
+#'   \code{\link{load_control_annotations}}.
 #' @param output_dir Directory where model RDS files will be saved.
 #' @param n_models Number of ensemble models to train. Default: 100.
 #' @param controls_per_model Number of controls sampled per model. Default: NULL
@@ -132,7 +137,9 @@ train_PI_models <- function(case_csv,
                             features = NULL,
                             chromosomes = 1:22,
                             random_seed = NULL,
-                            verbose = 1) {
+                            verbose = 1,
+                            control_format = "auto") {
+  control_format <- match.arg(control_format, c("auto", "csv", "gds"))
   # Set random seed FIRST for reproducibility of all subsequent operations
   if (!is.null(random_seed)) {
     set.seed(random_seed)
@@ -169,6 +176,7 @@ train_PI_models <- function(case_csv,
     source = control_source,
     features = features,
     chromosomes = chromosomes,
+    format = control_format,
     max_controls = max_controls
   )
   if (verbose >= 1) message("  Loaded ", nrow(ctrl_mat), " controls.")

@@ -242,3 +242,45 @@ test_that(".apply_annotation_predicate never returns NA", {
   expect_equal(GLOWr:::.apply_annotation_predicate(vals_chr, annotation_predicate("empty")),
                c(FALSE, TRUE, TRUE))
 })
+
+
+# ---- Text values of a membership test against a numeric annotation (GLOWr 0.3.6) ----
+
+test_that("a membership test compares text values with a numeric annotation as numbers", {
+  vals <- c(100000, 1000, 0.5, 7, NA)
+  # R alone turns the numbers into text for the comparison and misses these.
+  expect_false(100000 %in% "100000")
+  hit <- GLOWr:::.apply_annotation_predicate(vals, annotation_predicate("in", c("100000", "1e3", "0.50")))
+  expect_identical(hit, c(TRUE, TRUE, TRUE, FALSE, FALSE))
+  miss <- GLOWr:::.apply_annotation_predicate(vals, annotation_predicate("not_in", c("100000", "1e3")))
+  expect_identical(miss, c(FALSE, FALSE, TRUE, TRUE, TRUE))
+  # The same test given as numbers gives the same answer.
+  expect_identical(GLOWr:::.apply_annotation_predicate(vals, annotation_predicate("in", c(100000, 1000, 0.5))), hit)
+})
+
+test_that("a membership test keeps text labels of a character annotation as text", {
+  vals <- c("007", "7", "D", NA)
+  expect_identical(GLOWr:::.apply_annotation_predicate(vals, annotation_predicate("in", c("007", "D"))),
+                   c(TRUE, FALSE, TRUE, FALSE))
+})
+
+test_that("a membership test with a value that is not a number stops for a numeric annotation", {
+  expect_error(
+    GLOWr:::.apply_annotation_predicate(c(1, 2), annotation_predicate("in", c("1", "high")), "cadd_phred"),
+    "column 'cadd_phred' has value\\(s\\) that are not numbers \\('high'\\)")
+})
+
+test_that("a membership test given as text matches a logical and a 64-bit integer annotation", {
+  # (GLOWr 0.3.6: the conversion of .filter_values_for_column() covers these two column types.)
+  flags <- c(TRUE, FALSE, NA)
+  expect_identical(GLOWr:::.apply_annotation_predicate(flags, annotation_predicate("in", "true")),
+                   GLOWr:::.apply_annotation_predicate(flags, annotation_predicate("in", TRUE)))
+  expect_identical(GLOWr:::.apply_annotation_predicate(flags, annotation_predicate("in", "true"))[1:2], c(TRUE, FALSE))
+  expect_identical(GLOWr:::.apply_annotation_predicate(flags, annotation_predicate("not_in", "true"))[1:2], c(FALSE, TRUE))
+  skip_if_not_installed("bit64")
+  ids <- bit64::as.integer64(c("9007199254740992", "9007199254740993"))
+  expect_identical(GLOWr:::.apply_annotation_predicate(ids, annotation_predicate("in", "9007199254740993")),
+                   c(FALSE, TRUE))
+  expect_identical(GLOWr:::.apply_annotation_predicate(ids, annotation_predicate("not_in", "9007199254740993")),
+                   c(TRUE, FALSE))
+})

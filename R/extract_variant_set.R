@@ -876,9 +876,11 @@ compute_annotation_medians <- function(gds,
       condition <- clause[[field_name]]
       field_values <- anno_values[[field_name]]
       term <- if (.is_annotation_predicate(condition)) {
-        .apply_annotation_predicate(field_values, condition)
+        .apply_annotation_predicate(field_values, condition, field_name)
       } else {
-        field_values %in% condition
+        # Text values against a numeric annotation are compared as numbers
+        # (.filter_values_for_column(), R/get_B_data_loader_helpers.R).
+        field_values %in% .filter_values_for_column(condition, field_values, field_name)
       }
       clause_result <- clause_result & term
     }
@@ -894,17 +896,20 @@ compute_annotation_medians <- function(gds,
 #' @param values Vector of annotation values (numeric or character) in
 #'   filtered-variant order.
 #' @param pred A \code{glow_annotation_predicate}.
+#' @param field_name Character. The name of the annotation field, for the error message of
+#'   a membership test whose text values are not numbers while the field is numeric.
 #' @return Logical vector, same length as \code{values}, never NA.
 #' @keywords internal
 #' @noRd
-.apply_annotation_predicate <- function(values, pred) {
+.apply_annotation_predicate <- function(values, pred, field_name = "annotation") {
   op <- pred$op
   if (op %in% c("nonempty", "empty")) {
     present <- if (is.character(values)) !is.na(values) & nzchar(values) else !is.na(values)
     return(if (op == "nonempty") present else !present)
   }
   if (op %in% c("in", "not_in")) {
-    hit <- values %in% pred$value
+    # Text values against a numeric annotation are compared as numbers.
+    hit <- values %in% .filter_values_for_column(pred$value, values, field_name)
     return(if (op == "in") hit else !hit)
   }
   num <- if (is.numeric(values)) values else suppressWarnings(as.numeric(as.character(values)))

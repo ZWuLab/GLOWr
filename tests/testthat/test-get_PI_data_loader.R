@@ -360,3 +360,28 @@ test_that("prepare_PI_case_data filters to autosomes correctly", {
   # Should have removed X and Y chromosomes (2 variants)
   expect_true(result$metadata$filters_applied$n_removed_autosome >= 2)
 })
+
+
+# ========== Test 13: The removed option filter_indels ==========
+
+test_that("prepare_PI_case_data refuses the removed option filter_indels", {
+
+  qc <- list(remove_duplicates = FALSE, filter_autosomes = FALSE, remove_na = FALSE)
+
+  # A request for the option stops, and the message names it and the release.
+  expect_error(
+    prepare_PI_case_data(data = test_data, qc_filters = c(qc, list(filter_indels = TRUE)),
+                         verbose = 0),
+    "filter_indels is not supported.*removed in GLOWr 0\\.3\\.6"
+  )
+
+  # FALSE is what the function always did: the result equals the one without the field.
+  with_false <- prepare_PI_case_data(data = test_data,
+                                     qc_filters = c(qc, list(filter_indels = FALSE)),
+                                     verbose = 0)
+  without <- prepare_PI_case_data(data = test_data, qc_filters = qc, verbose = 0)
+  expect_identical(with_false$data, without$data)
+
+  # The default list no longer carries the field.
+  expect_false("filter_indels" %in% names(eval(formals(prepare_PI_case_data)$qc_filters)))
+})
